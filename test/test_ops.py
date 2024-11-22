@@ -79,7 +79,6 @@ from torch.testing._internal.common_utils import (
     unMarkDynamoStrictTest,
     GPU_TYPES,
     HAS_GPU,
-    get_gpu_autocast,
 )
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map
@@ -2840,7 +2839,7 @@ class TestFakeTensor(TestCase):
         fake_backward_xfails | fake_autocast_backward_xfails,
     )
     def test_fake_crossref_backward_amp(self, device, dtype, op):
-        self._test_fake_crossref_helper(device, dtype, op, get_gpu_autocast())
+        self._test_fake_crossref_helper(device, dtype, op, torch.cuda.amp.autocast)
 
     @ops([op for op in ops_and_refs if op.is_factory_function])
     def test_strided_layout(self, device, dtype, op):
