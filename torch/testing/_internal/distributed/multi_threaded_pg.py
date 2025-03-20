@@ -483,8 +483,7 @@ def _create_threaded_pg(prefix_store, rank, world_size, timeout):
     _store_based_barrier(rank, prefix_store, "", world_size, timeout)
     return pg
 
-
-dist.Backend.register_backend("threaded", _create_threaded_pg, devices=["cpu", "cuda"])
+dist.Backend.register_backend("threaded", _create_threaded_pg, devices=["cpu", "cuda", "xpu"])
 
 
 @dataclass
