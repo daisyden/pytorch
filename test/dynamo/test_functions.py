@@ -34,10 +34,13 @@ from torch._dynamo.utils import ifdynstaticdefault, same
 from torch._dynamo.variables import ConstantVariable, SkipFunctionVariable
 from torch._dynamo.variables.lists import RangeVariable
 from torch.nn import functional as F
-from torch.testing._internal.common_cuda import TEST_MULTIGPU
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
+    TEST_CUDA,
+    TEST_GPU,
+    TEST_MULTIGPU,
+    TEST_XPU,
 )
 
 # Defines all the kernels for tests
@@ -50,6 +53,9 @@ d = torch.ones(10, 10)
 e = torch.nn.Linear(10, 10)
 flag = True
 
+if TEST_GPU:
+    GPU_TYPE = torch.accelerator.current_accelerator().type
+    GPU_MODULE = getattr(torch, torch.accelerator.current_accelerator().type)
 
 class CustomDictSubclass(collections.OrderedDict):
     pass
@@ -1082,13 +1088,15 @@ class FunctionTests(torch._dynamo.test_case.TestCase):
         if not x.is_cuda:
             return x + 1
 
-    @unittest.skipIf(not torch.cuda.is_available(), "requires cuda")
+    @unittest.skipIf(not TEST_GPU, "requires gpu")
     @make_test
     def test_get_device_properties_tensor_device(a):
-        x = a.to("cuda")
-        prop = torch.cuda.get_device_properties(x.device)
-        if prop.major == 8:
+        x = a.to(GPU_TYPE)
+        prop = GPU_MODULE.get_device_properties(x.device)
+        if TEST_CUDA and prop.major == 8:
             return x + prop.multi_processor_count
+        elif TEST_XPU:
+            return x + prop.gpu_subslice_count
         return x + prop.max_threads_per_multi_processor
 
     @make_test
@@ -1096,10 +1104,10 @@ class FunctionTests(torch._dynamo.test_case.TestCase):
         m = a.to(torch.float16)
         return b.type(m.type())
 
-    @unittest.skipIf(not torch.cuda.is_available(), "requires cuda")
+    @unittest.skipIf(not TEST_GPU, "requires gpu")
     @make_test
     def test_tensor_type2(a, b):
-        m = a.to("cuda")
+        m = a.to(GPU_TYPE)
         return m + b.type(m.type())
 
     @make_test
@@ -4691,10 +4699,10 @@ class DefaultsTests(torch._dynamo.test_case.TestCase):
             opt_fn(x, ys, zs[:1])
 
     @unittest.skipIf(not TEST_MULTIGPU, "detected only one GPU")
-    def test_cuda_current_device(self):
+    def test_gpu_current_device(self):
         def fn(x):
             y = torch.empty(
-                (2, 3), dtype=torch.float32, device=torch.cuda.current_device()
+                (2, 3), dtype=torch.float32, device=GPU_MODULE.current_device()
             )
             y.copy_(x)
             return torch.sin(y + y.device.index)
@@ -4702,11 +4710,11 @@ class DefaultsTests(torch._dynamo.test_case.TestCase):
         counter = torch._dynamo.testing.CompileCounter()
         opt_fn = torch.compile(backend=counter, fullgraph=True)(fn)
 
-        with torch.cuda.device(0):
+        with GPU_MODULE.device(0):
             x = torch.randn(2, 3)
             self.assertEqual(opt_fn(x), fn(x))
             self.assertEqual(counter.frame_count, 1)
-            with torch.cuda.device(1):
+            with GPU_MODULE.device(1):
                 self.assertEqual(opt_fn(x), fn(x))
                 self.assertEqual(counter.frame_count, 2)
 

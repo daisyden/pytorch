@@ -29,15 +29,15 @@ from torch._inductor.utils import fresh_cache
 from torch._subclasses import FakeTensorMode
 from torch.compiler._cache import CacheArtifactManager
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
-from torch.testing._internal.common_cuda import SM80OrLater, TEST_MULTIGPU
+from torch.testing._internal.common_cuda import SM80OrLater
 from torch.testing._internal.common_device_type import largeTensorTest
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
     skipIfWindows,
 )
-from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_GPU, requires_triton
-from torch.testing._internal.triton_utils import requires_cuda
+from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_GPU, HAS_MULTIGPU, requires_triton
+from torch.testing._internal.triton_utils import requires_gpu
 from torch.testing._internal.two_tensor import TwoTensor
 
 
@@ -641,7 +641,7 @@ class AOTAutogradCacheTests(InductorTestCase):
         self.assertEqual(counters["aot_autograd"]["autograd_cache_hit"], 1)
         self.assertEqual(counters["aot_autograd"]["autograd_cache_saved"], 0)
 
-    @requires_cuda
+    @requires_gpu
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
     @functorch_config.patch({"enable_autograd_cache": True})
@@ -663,7 +663,7 @@ class AOTAutogradCacheTests(InductorTestCase):
         def fn(a):
             return MyAutogradFunction.apply(a)
 
-        a = torch.randn(5, device="cuda", requires_grad=True)
+        a = torch.randn(5, device=torch.accelerator.current_accelerator().type, requires_grad=True)
         a2 = a.clone().detach_().requires_grad_(True)
         compiled_fn = torch.compile(fn, backend="inductor")
         result = compiled_fn(a)
@@ -697,7 +697,7 @@ class AOTAutogradCacheTests(InductorTestCase):
         self.assertEqual(counters["aot_autograd"]["autograd_cache_hit"], 0)
         self.assertEqual(counters["aot_autograd"]["autograd_cache_saved"], 1)
 
-    @requires_cuda
+    @requires_gpu
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
     @functorch_config.patch({"enable_autograd_cache": True})
@@ -719,7 +719,7 @@ class AOTAutogradCacheTests(InductorTestCase):
         def fn(a):
             return MyAutogradFunction.apply(a)
 
-        a = torch.randn(5, device="cuda", requires_grad=True)
+        a = torch.randn(5, device=torch.accelerator.current_accelerator().type, requires_grad=True)
         a2 = a.clone().detach_().requires_grad_(True)
         compiled_fn = torch.compile(fn, backend="inductor")
         result = compiled_fn(a)
@@ -739,7 +739,7 @@ class AOTAutogradCacheTests(InductorTestCase):
         self.assertEqual(counters["aot_autograd"]["autograd_cache_hit"], 1)
         self.assertEqual(counters["aot_autograd"]["autograd_cache_saved"], 0)
 
-    @requires_cuda
+    @requires_gpu
     @requires_triton()
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)
@@ -773,7 +773,7 @@ class AOTAutogradCacheTests(InductorTestCase):
         def fn(a):
             return MyAutogradFunction.apply(a)
 
-        a = torch.randn(5, device="cuda", requires_grad=True)
+        a = torch.randn(5, device=torch.accelerator.current_accelerator().type, requires_grad=True)
         a2 = a.clone().detach_().requires_grad_(True)
         compiled_fn = torch.compile(fn, backend="inductor")
         result = compiled_fn(a)
@@ -1184,34 +1184,35 @@ class AOTAutogradCacheTests(InductorTestCase):
     @inductor_config.patch("fx_graph_cache", True)
     @inductor_config.patch("fx_graph_remote_cache", False)
     @functorch_config.patch({"enable_autograd_cache": True})
-    @unittest.skipIf(not TEST_MULTIGPU, "only one GPU detected")
+    @unittest.skipIf(not HAS_MULTIGPU, "only one GPU detected")
     def test_constant_tensor_device_guards(self):
         """
         Usually, when there are example inputs, the device index of the inputs
         is sufficient to make sure we don't cache hit with the results from different
-        cuda devices.
-        When the input has no arguments, we still need to have the cuda
+        GPU devices.
+        When the input has no arguments, we still need to have the GPU
         device index in the cache key.
         """
 
         @torch.compile
         def f():
-            y = torch.tensor([5], device="cuda")
+            y = torch.tensor([5], device=torch.accelerator.current_accelerator().type)
             return (y,)
 
-        with torch.cuda._DeviceGuard(0):
-            torch.cuda.set_device(0)
+
+        with getattr(torch, GPU_TYPE)._DeviceGuard(0):
+            getattr(torch, GPU_TYPE).set_device(0)
             result = f()
-            self.assertEqual(result[0].device, torch.device("cuda:0"))
+            self.assertEqual(result[0].device, torch.device(f"{GPU_TYPE}:0"))
 
         self._clear_dynamo_and_codecache()
 
-        with torch.cuda._DeviceGuard(1):
-            torch.cuda.set_device(1)
+        with getattr(torch, GPU_TYPE)._DeviceGuard(1):
+            getattr(torch, GPU_TYPE).set_device(1)
             result = f()
-            self.assertEqual(result[0].device, torch.device("cuda:1"))
+            self.assertEqual(result[0].device, torch.device(f"{GPU_TYPE}:1"))
 
-    @requires_cuda
+    @requires_gpu
     @inductor_config.patch("fx_graph_cache", True)
     @inductor_config.patch("fx_graph_remote_cache", False)
     @functorch_config.patch({"enable_autograd_cache": True})
@@ -1226,8 +1227,8 @@ class AOTAutogradCacheTests(InductorTestCase):
         def f(x, y):
             return x.sin() + y
 
-        x = torch.randn(10, device="cuda")
-        y = torch.randn(10, device="cuda")
+        x = torch.randn(10, device=torch.accelerator.current_accelerator().type)
+        y = torch.randn(10, device=torch.accelerator.current_accelerator().type)
         with torch.no_grad():
             result = f(x, y)
             self.assertEqual(result, x.sin() + y)
@@ -1576,7 +1577,7 @@ class AOTAutogradCacheBundledTests(AOTAutogradCacheTests):
 class AOTAutogradCachePicklerTests(torch._dynamo.test_case.TestCase):
     @property
     def device_type(self) -> str:
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        return torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 
     def default_config(self):
         return AOTConfig(

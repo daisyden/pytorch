@@ -17,10 +17,7 @@ from torch.testing._internal.common_device_type import (
     onlyHPU,
 )
 from torch.testing._internal.common_utils import skipIfHpu
-from torch.testing._internal.inductor_utils import HAS_CUDA
-
-
-requires_cuda = unittest.skipUnless(HAS_CUDA, "requires cuda")
+from torch.testing._internal.triton_utils import requires_cuda, requires_gpu
 
 
 class Seq(torch.nn.Module):
@@ -394,8 +391,8 @@ class TestCustomBackendAPI(torch._dynamo.test_case.TestCase):
         self.assertTrue(backend_run)
 
 
-devices = ["cpu", "cuda", "hpu"]
-instantiate_device_type_tests(TestOptimizations, globals(), only_for=devices)
+devices = ["cpu", "cuda", "hpu", "xpu"]
+instantiate_device_type_tests(TestOptimizations, globals(), only_for=devices, allow_xpu=True)
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
