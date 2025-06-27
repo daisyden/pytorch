@@ -312,8 +312,9 @@ class TestFSDPHybridShard(FSDPTest):
         cntr = Counter()
         patched_allreduce = partial(patched_collective, orig_ar, cntr)
         patched_reduce_scatter = partial(patched_collective, orig_rs, cntr)
-        with patch_allreduce(patched_allreduce), patch_reduce_scatter(
-            patched_reduce_scatter
+        with (
+            patch_allreduce(patched_allreduce),
+            patch_reduce_scatter(patched_reduce_scatter),
         ):
             inp = hsdp_model.get_input(device=torch.accelerator.current_device_index())
             out = hsdp_model(inp[0], inp[1])
@@ -357,9 +358,9 @@ class TestFSDPHybridShard(FSDPTest):
             use_orig_params,
             hsdp_process_groups=hsdp_pgs,
         )
-        assert (
-            hsdp_model._inter_node_pg.size() > 1
-        ), "HSDP model initialized without replication"
+        assert hsdp_model._inter_node_pg.size() > 1, (
+            "HSDP model initialized without replication"
+        )
         fsdp_optim = torch.optim.Adam(fsdp_model.parameters(), lr=1e-2)
         hsdp_optim = torch.optim.Adam(hsdp_model.parameters(), lr=1e-2)
         torch.manual_seed(global_pg.rank() + 1)
