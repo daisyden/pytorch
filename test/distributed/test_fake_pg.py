@@ -71,7 +71,7 @@ class TestFakePG(TestCase):
     def test_construct_fsdp(self):
         store = FakeStore()
         dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
-        FSDP(nn.Linear(2, 3, device=self.device_type))
+        FSDP(nn.Linear(2, 3, device=device_type))
 
     @unittest.skipIf(TEST_XPU, "test doesn't currently work on the XPU stack")
     @skipIfHpu
