@@ -884,8 +884,9 @@ Unsupported Tensor.backward() call
     def _create_transformer_factory_fns(
         self, all_requires_grad, *, activation_checkpoint=False
     ):
-        seq_len = 16
-        vocab_size = 8
+        max_seq_len = 24
+        seq_len = 24
+        vocab_size = 24
         n_layers = 3
 
         def model_init_fn():
@@ -893,6 +894,7 @@ Unsupported Tensor.backward() call
             fsdp_config = {}
             mesh = init_device_mesh(device_type.type, (self.world_size,))
             model_args = ModelArgs(
+                max_seq_len=max_seq_len,
                 vocab_size=vocab_size,
                 n_layers=n_layers,
                 checkpoint_activations=activation_checkpoint,
