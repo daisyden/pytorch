@@ -1293,7 +1293,7 @@ def _has_sufficient_memory(device, size):
     if device == "xla":
         raise unittest.SkipTest("TODO: Memory availability checks for XLA?")
 
-    if device == "xpu":
+    if torch.device(device).type  == "xpu":
         raise unittest.SkipTest("TODO: Memory availability checks for Intel GPU?")
 
     if device != "cpu":
@@ -1577,6 +1577,11 @@ class dtypesIfCUDA(dtypes):
         super().__init__(*args, device_type="cuda")
 
 
+class dtypesIfXPU(dtypes):
+    def __init__(self, *args):
+        super().__init__(*args, device_type="xpu")
+
+
 class dtypesIfMPS(dtypes):
     def __init__(self, *args):
         super().__init__(*args, device_type="mps")
@@ -1610,6 +1615,11 @@ def onlyXPU(fn):
 
 def onlyHPU(fn):
     return onlyOn("hpu")(fn)
+
+
+def onlyAccelerator(fn):
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else None
+    return onlyOn(device)(fn)
 
 
 def onlyPRIVATEUSE1(fn):
@@ -1949,7 +1959,7 @@ def skipPRIVATEUSE1(fn):
 # TODO: the "all" in the name isn't true anymore for quite some time as we have also have for example XLA and MPS now.
 #  This should probably enumerate all available device type test base classes.
 def get_all_device_types() -> list[str]:
-    return ["cpu"] if not torch.cuda.is_available() else ["cpu", "cuda"]
+    return ["cpu"] if not torch.accelerator.is_available() else ["cpu", torch.accelerator.current_accelerator().type]
 
 
 # skip since currently flex attention requires at least `avx2` support on CPU.
