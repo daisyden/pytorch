@@ -628,8 +628,17 @@ class XPUTestBase(DeviceTypeTestBase):
     @classmethod
     def get_all_devices(cls):
         # currently only one device is supported on MPS backend
+        primary_device_idx = int(cls.get_primary_device().split(":")[1])
+        num_devices = torch.xpu.device_count()
+
         prim_device = cls.get_primary_device()
-        return [prim_device]
+        xpu_str = "xpu:{0}"
+        non_primary_devices = [
+            xpu_str.format(idx)
+            for idx in range(num_devices)
+            if idx != primary_device_idx
+        ]
+        return [prim_device] + non_primary_devices
 
     @classmethod
     def setUpClass(cls):
@@ -1383,13 +1392,13 @@ class expectedFailure:
 
 
 class onlyOn:
-    def __init__(self, device_type):
+    def __init__(self, device_type: Union[str, list]):
         self.device_type = device_type
 
     def __call__(self, fn):
         @wraps(fn)
         def only_fn(slf, *args, **kwargs):
-            if self.device_type != slf.device_type:
+            if slf.device_type not in self.device_type:
                 reason = f"Only runs on {self.device_type}"
                 raise unittest.SkipTest(reason)
 
@@ -1415,7 +1424,7 @@ class deviceCountAtLeast:
         @wraps(fn)
         def multi_fn(slf, devices, *args, **kwargs):
             if len(devices) < self.num_required_devices:
-                reason = f"fewer than {self.num_required_devices} devices detected"
+                reason = f"fewer than {self.num_required_devices} devices detected, {devices}"
                 raise unittest.SkipTest(reason)
 
             return fn(slf, devices, *args, **kwargs)

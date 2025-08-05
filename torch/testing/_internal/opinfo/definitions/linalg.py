@@ -28,12 +28,14 @@ from torch.testing._internal.common_device_type import (
     skipCUDAIfRocm,
     tol,
     toleranceOverride,
+    skipXPUIf,
 )
 from torch.testing._internal.common_dtype import (
     all_types_and_complex,
     all_types_and_complex_and,
     floating_and_complex_types,
     floating_and_complex_types_and,
+    floating_types,
 )
 from torch.testing._internal.common_utils import (
     GRADCHECK_NONDET_TOL,
@@ -41,6 +43,7 @@ from torch.testing._internal.common_utils import (
     skipIfSlowGradcheckEnv,
     slowTest,
     TEST_WITH_ROCM,
+    TEST_XPU,
 )
 from torch.testing._internal.opinfo.core import (
     clone_sample,
@@ -1192,6 +1195,7 @@ op_db: list[OpInfo] = [
         sample_inputs_func=sample_inputs_linalg_cholesky,
         gradcheck_wrapper=gradcheck_wrapper_hermitian_input,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
     ),
     OpInfo(
         "linalg.cholesky_ex",
@@ -1204,6 +1208,7 @@ op_db: list[OpInfo] = [
         sample_inputs_func=sample_inputs_linalg_cholesky,
         gradcheck_wrapper=gradcheck_wrapper_hermitian_input,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
     ),
     OpInfo(
         "linalg.vecdot",
@@ -1276,6 +1281,7 @@ op_db: list[OpInfo] = [
         check_batched_gradgrad=False,
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
+        dtypesIfXPU=floating_types(),
         skips=(
             # AssertionError: Scalars are not equal!
             DecorateInfo(
@@ -1317,6 +1323,7 @@ op_db: list[OpInfo] = [
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
         decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -1352,6 +1359,7 @@ op_db: list[OpInfo] = [
         check_batched_gradgrad=False,
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
+        dtypesIfXPU=floating_types(),
         decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack, with_tf32_off],
         skips=(
             DecorateInfo(
@@ -1389,6 +1397,7 @@ op_db: list[OpInfo] = [
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
         decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             # Pre-existing condition; Needs to be fixed
             DecorateInfo(
@@ -1452,6 +1461,7 @@ op_db: list[OpInfo] = [
         supports_autograd=False,
         sample_inputs_func=sample_inputs_linalg_ldl_factor,
         decorators=[skipCUDAIfNoMagmaAndNoLinalgsolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
     ),
     OpInfo(
         "linalg.ldl_factor_ex",
@@ -1460,6 +1470,7 @@ op_db: list[OpInfo] = [
         supports_autograd=False,
         sample_inputs_func=sample_inputs_linalg_ldl_factor,
         decorators=[skipCUDAIfNoMagmaAndNoLinalgsolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
     ),
     OpInfo(
         "linalg.ldl_solve",
@@ -1475,6 +1486,7 @@ op_db: list[OpInfo] = [
             skipCUDAIfRocm,
             skipCPUIfNoLapack,
         ],
+        dtypesIfXPU=floating_types(),
     ),
     OpInfo(
         "linalg.lstsq",
@@ -1484,6 +1496,7 @@ op_db: list[OpInfo] = [
         sample_inputs_func=sample_inputs_linalg_lstsq,
         error_inputs_func=error_inputs_lstsq,
         decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             # we skip gradient checks for this suite as they are tested in
             # variant_test_name='grad_oriented'
@@ -1531,6 +1544,7 @@ op_db: list[OpInfo] = [
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
         decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             # tests do not work with passing lambda for op
             DecorateInfo(
@@ -1707,6 +1721,7 @@ op_db: list[OpInfo] = [
         check_batched_gradgrad=False,
         sample_inputs_func=sample_inputs_linalg_qr_geqrf,
         decorators=[skipCUDAIfNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
     ),
     OpInfo(
         "linalg.slogdet",
@@ -1764,9 +1779,10 @@ op_db: list[OpInfo] = [
         supports_fwgrad_bwgrad=True,
         sample_inputs_func=sample_inputs_linalg_lu,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             # linalg.lu_factor: LU without pivoting is not implemented on the CPU
-            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_compare_cpu"),
+            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_compare_cpu", active_if=(not TEST_XPU)),
         ),
     ),
     OpInfo(
@@ -1780,9 +1796,10 @@ op_db: list[OpInfo] = [
         supports_fwgrad_bwgrad=True,
         sample_inputs_func=sample_inputs_linalg_lu,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             # linalg.lu_factor: LU without pivoting is not implemented on the CPU
-            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_compare_cpu"),
+            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_compare_cpu", active_if=(not TEST_XPU)),
         ),
     ),
     OpInfo(
@@ -1796,10 +1813,10 @@ op_db: list[OpInfo] = [
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
         sample_inputs_func=sample_inputs_linalg_lu,
-        decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack,],
         skips=(
             # linalg.lu_factor: LU without pivoting is not implemented on the CPU
-            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_compare_cpu"),
+            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_compare_cpu", active_if=(not TEST_XPU)),
         ),
     ),
     OpInfo(
@@ -1813,6 +1830,7 @@ op_db: list[OpInfo] = [
         check_batched_forward_grad=False,
         supports_fwgrad_bwgrad=True,
         sample_inputs_func=sample_inputs_lu_solve,
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Tests different backward paths"),
@@ -1833,6 +1851,7 @@ op_db: list[OpInfo] = [
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -1867,6 +1886,7 @@ op_db: list[OpInfo] = [
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -1911,6 +1931,7 @@ op_db: list[OpInfo] = [
                 device_type="cpu",
             ),
         ],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -1953,6 +1974,7 @@ op_db: list[OpInfo] = [
                 device_type="cpu",
             ),
         ],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -1995,6 +2017,7 @@ op_db: list[OpInfo] = [
         supports_autograd=False,
         sample_inputs_func=sample_inputs_matrix_rank,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -2027,6 +2050,7 @@ op_db: list[OpInfo] = [
         supports_autograd=False,
         sample_inputs_func=sample_inputs_linalg_pinv_hermitian,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -2057,6 +2081,7 @@ op_db: list[OpInfo] = [
         supports_fwgrad_bwgrad=True,
         sample_inputs_func=sample_inputs_linalg_pinv,
         decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             # errors with "leaked XXXX bytes CUDA memory on device 0"
             DecorateInfo(
@@ -2085,6 +2110,7 @@ op_db: list[OpInfo] = [
         # Only large tensors show issues with implicit backward used prior to
         # explicit backward implementation.
         decorators=[slowTest, skipCUDAIfNoCusolver, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
@@ -2121,6 +2147,7 @@ op_db: list[OpInfo] = [
         sample_inputs_func=sample_inputs_linalg_pinv_hermitian,
         gradcheck_wrapper=gradcheck_wrapper_hermitian_input,
         decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Skipped!"),
@@ -2164,6 +2191,7 @@ op_db: list[OpInfo] = [
         aten_name="linalg_svd",
         decomp_aten_name="_linalg_svd",
         dtypes=floating_and_complex_types(),
+        dtypesIfXPU=floating_types(),
         # Runs very slowly on slow-gradcheck - alternatively reduce input sizes
         gradcheck_fast_mode=True,
         supports_fwgrad_bwgrad=True,
@@ -2256,6 +2284,7 @@ op_db: list[OpInfo] = [
         # See https://github.com/pytorch/pytorch/pull/78358
         check_batched_forward_grad=False,
         decorators=[skipCPUIfNoLapack, skipCUDAIfNoMagmaAndNoCusolver],
+        dtypesIfXPU=floating_types(),
         skips=(
             DecorateInfo(
                 unittest.skip("Unsupported on MPS for now"),

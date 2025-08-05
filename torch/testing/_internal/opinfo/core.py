@@ -772,6 +772,9 @@ class OpInfo:
     backward_dtypesIfROCM: _dispatch_dtypes = None
 
     backward_dtypesIfHpu: _dispatch_dtypes = None
+    
+    # backward dtypes this function is expected to work with on XPU
+    backward_dtypesIfXPU: _dispatch_dtypes = None
 
     # the following metadata describes the operators out= support
 

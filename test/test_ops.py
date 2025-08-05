@@ -27,10 +27,12 @@ from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
     onlyCPU,
     onlyCUDA,
+    onlyXPU,
     onlyNativeDeviceTypesAnd,
     OpDTypes,
     ops,
     skipMeta,
+    onlyOn,
 )
 from torch.testing._internal.common_dtype import (
     all_types_and_complex_and,
@@ -222,7 +224,7 @@ class TestCommon(TestCase):
             assert len(filtered_ops) == 0, err_msg
 
     # Validates that each OpInfo works correctly on different CUDA devices
-    @onlyCUDA
+    @onlyOn(['cuda','xpu'])
     @deviceCountAtLeast(2)
     @ops(op_db, allowed_dtypes=(torch.float32, torch.long))
     def test_multiple_devices(self, devices, dtype, op):
@@ -354,7 +356,7 @@ class TestCommon(TestCase):
                 )
 
     # Tests that the cpu and gpu results are consistent
-    @onlyCUDA
+    @onlyOn(['cuda','xpu'])
     @suppress_warnings
     @slowTest
     @ops(_ops_and_refs_with_no_numpy_ref, dtypes=OpDTypes.any_common_cpu_cuda_one)
@@ -615,7 +617,7 @@ class TestCommon(TestCase):
             )
         self._ref_test_helper(contextlib.nullcontext, device, dtype, op)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @ops(python_ref_db)
     @parametrize("executor", ["aten"])
     @skipIfTorchInductor("Takes too long for inductor")
@@ -641,6 +643,7 @@ class TestCommon(TestCase):
         error_inputs = op.error_inputs(device)
         for ei in error_inputs:
             si = ei.sample_input
+    
             with self.assertRaisesRegex(ei.error_type, ei.error_regex):
                 out = op(si.input, *si.args, **si.kwargs)
                 self.assertFalse(isinstance(out, type(NotImplemented)))
@@ -850,7 +853,7 @@ class TestCommon(TestCase):
             # NOTE: only extracts on the CPU and CUDA device types since some
             #   device types don't have storage
             def _extract_data_ptrs(out):
-                if self.device_type != "cpu" and self.device_type != "cuda":
+                if self.device_type != "cpu" and ( self.device_type != "cuda" and self.device_type != "xpu" ):
                     return ()
 
                 if isinstance(out, torch.Tensor):
@@ -978,7 +981,7 @@ class TestCommon(TestCase):
             # NOTE: only extracts on the CPU and CUDA device types since some
             #   device types don't have storage
             def _extract_data_ptrs(out):
-                if self.device_type != "cpu" and self.device_type != "cuda":
+                if self.device_type != "cpu" and ( self.device_type != "cuda" and self.device_type != "xpu") :
                     return ()
 
                 if isinstance(out, torch.Tensor):
@@ -2836,7 +2839,7 @@ class TestFakeTensor(TestCase):
             self.assertEqual(strided_result.layout, torch.strided)
 
 
-instantiate_device_type_tests(TestCommon, globals())
+instantiate_device_type_tests(TestCommon, globals(), allow_xpu=True)
 instantiate_device_type_tests(TestCompositeCompliance, globals())
 instantiate_device_type_tests(TestMathBits, globals())
 instantiate_device_type_tests(TestRefsOpsInfo, globals(), only_for="cpu")

@@ -14,7 +14,7 @@ from torch.testing._internal.common_device_type import (
     toleranceOverride,
 )
 from torch.testing._internal.common_dtype import all_types_and, floating_types
-from torch.testing._internal.common_utils import TEST_SCIPY, torch_to_numpy_dtype_dict
+from torch.testing._internal.common_utils import TEST_SCIPY, torch_to_numpy_dtype_dict, skipIfXpu
 from torch.testing._internal.opinfo.core import (
     BinaryUfuncInfo,
     DecorateInfo,
@@ -443,6 +443,7 @@ op_db: list[OpInfo] = [
         "special.hermite_polynomial_h",
         dtypes=all_types_and(torch.bool),
         promotes_int_to_float=True,
+        decorators=[skipIfXpu,],
         skips=(
             DecorateInfo(unittest.skip("Skipped!"), "TestCudaFuserOpInfo"),
             DecorateInfo(unittest.skip("Skipped!"), "TestNNCOpInfo"),
@@ -474,6 +475,8 @@ op_db: list[OpInfo] = [
             DecorateInfo(unittest.skip("Skipped!"), "TestNNCOpInfo"),
             # Greatest absolute difference: nan
             DecorateInfo(unittest.expectedFailure, "TestCommon", "test_compare_cpu"),
+            # Too slow
+            DecorateInfo(unittest.skip, "TestCommon", "test_compare_cpu", device_type='xpu'),
         ),
         supports_one_python_scalar=True,
         supports_autograd=False,

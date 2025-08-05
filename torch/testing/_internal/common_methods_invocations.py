@@ -26,7 +26,7 @@ from torch.testing._internal.common_dtype import (
 )
 from torch.testing._internal.common_device_type import \
     (onlyCPU, onlyCUDA, onlyNativeDeviceTypes, disablecuDNN, skipCUDAIfNoMagma, skipCUDAIfNoMagmaAndNoCusolver,
-     skipCUDAIfNoCusolver, skipCPUIfNoLapack, skipCPUIfNoFFT, skipCUDAIf, precisionOverride,
+     skipCUDAIfNoCusolver, skipCPUIfNoLapack, skipCPUIfNoFFT, skipCUDAIf, skipIf, precisionOverride,
      skipCPUIfNoMklSparse,
      toleranceOverride, tol)
 from torch.testing._internal.common_cuda import (
@@ -39,7 +39,7 @@ from torch.testing._internal.common_utils import (
     TEST_WITH_ROCM, IS_FBCODE, IS_WINDOWS, IS_MACOS, IS_S390X, TEST_SCIPY,
     torch_to_numpy_dtype_dict, numpy_to_torch_dtype, TEST_WITH_ASAN,
     GRADCHECK_NONDET_TOL, slowTest, TEST_WITH_SLOW,
-    TEST_WITH_TORCHINDUCTOR, MACOS_VERSION
+    TEST_WITH_TORCHINDUCTOR, MACOS_VERSION, skipIfXpu, 
 )
 from torch.testing._utils import wrapper_set_seed
 
@@ -12311,6 +12311,8 @@ op_db: list[OpInfo] = [
                DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_out_warning'),
                # https://github.com/pytorch/pytorch/issues/55907
                DecorateInfo(unittest.skip("Skipped!"), 'TestCommon', 'test_variant_consistency_eager'),
+               # xpu does not support float64 and complex128 for addbmm now
+               DecorateInfo(unittest.skip("Skipped!"), 'TestCommon', 'test_numpy_ref', dtypes=[torch.float64, torch.cdouble], device_type='xpu'),
            ),
            sample_inputs_func=sample_inputs_addbmm),
     OpInfo('baddbmm',
@@ -12358,11 +12360,19 @@ op_db: list[OpInfo] = [
                    'TestSchemaCheckModeOpInfo',
                    'test_schema_correctness',
                    dtypes=(torch.complex64, torch.complex128)),
+               # Issue with conj and torch dispatch, see https://github.com/pytorch/pytorch/issues/82479
+               DecorateInfo(
+                   unittest.skip("Skipped!"),
+                   'TestCommon',
+                   'test_errors',
+                   device_type='xpu'
+                   ),
            )),
     OpInfo('vdot',
            dtypes=all_types_and_complex_and(torch.float16, torch.bfloat16),
            dtypesIfCUDA=floating_and_complex_types_and(torch.float16, torch.bfloat16),
            dtypesIfHpu=custom_types(torch.float32, torch.bfloat16),
+           dtypesIfXpu=custom_types(torch.float32, torch.bfloat16),
            sample_inputs_func=sample_inputs_dot_vdot,
            error_inputs_func=error_inputs_dot_vdot,
            supports_forward_ad=True,
@@ -12374,6 +12384,13 @@ op_db: list[OpInfo] = [
                    'TestSchemaCheckModeOpInfo',
                    'test_schema_correctness',
                    dtypes=(torch.complex64, torch.complex128)),
+               # Issue with conj and torch dispatch, see https://github.com/pytorch/pytorch/issues/82479
+               DecorateInfo(
+                   unittest.skip("Skipped!"),
+                   'TestCommon',
+                   'test_errors',
+                   device_type='xpu'
+                   ),
            )),
     OpInfo('bmm',
            dtypes=all_types_and_complex_and(torch.float16, torch.bfloat16),
@@ -12774,7 +12791,8 @@ op_db: list[OpInfo] = [
            dtypes=floating_and_complex_types(),
            sample_inputs_func=sample_inputs_linalg_cholesky,
            gradcheck_wrapper=gradcheck_wrapper_hermitian_input,
-           decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],),
+           decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+           dtypesIfXPU=floating_types(),),
     OpInfo('cholesky_inverse',
            dtypes=floating_and_complex_types(),
            backward_dtypes=floating_and_complex_types(),
@@ -12785,6 +12803,7 @@ op_db: list[OpInfo] = [
            check_batched_gradgrad=True,
            sample_inputs_func=sample_inputs_linalg_cholesky_inverse,
            gradcheck_wrapper=gradcheck_wrapper_triangular_input_real_positive_diagonal,
+           dtypesIfXPU=floating_types(),
            decorators=[
                skipCUDAIfNoMagma,
                skipCPUIfNoLapack,
@@ -12813,7 +12832,8 @@ op_db: list[OpInfo] = [
            supports_forward_ad=True,
            supports_fwgrad_bwgrad=True,
            gradcheck_wrapper=lambda *args, **kwargs: gradcheck_wrapper_triangular_input(*args, idx=1, **kwargs),
-           decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack]),
+           decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+           dtypesIfXPU=floating_types(),),
     OpInfo('chunk',
            dtypes=all_types_and_complex_and(torch.bool, torch.bfloat16, torch.float16, torch.chalf),
            dtypesIfHpu=custom_types(torch.float32, torch.bfloat16, torch.int32),
@@ -13200,6 +13220,7 @@ op_db: list[OpInfo] = [
                     variant_test_name='trunc_rounding',
                     dtypes=all_types_and(torch.half, torch.bfloat16),
                     dtypesIfHpu=custom_types(torch.float32, torch.bfloat16, torch.int32, torch.int8),
+                    dtypesIfXpu=custom_types(torch.float32, torch.bfloat16, torch.int32, torch.int8),
                     sample_kwargs=lambda device, dtype, input:
                         ({"rounding_mode": "trunc"}, {"rounding_mode": "trunc"}),
                     # https://github.com/pytorch/pytorch/issues/80411
@@ -13607,7 +13628,7 @@ op_db: list[OpInfo] = [
                skipCUDAIf(not ((_get_torch_cuda_version() >= (11, 3))
                                or (_get_torch_rocm_version() >= (5, 2))),
                           "cusparseSDDMM was added in 11.2.1"),
-               skipCPUIfNoMklSparse, ],
+               skipCPUIfNoMklSparse, skipIfXpu, ],
            skips=(
                # NotImplementedError: Tensors of type SparseCsrTensorImpl do not have is_contiguous
                DecorateInfo(unittest.skip("Skipped!"), 'TestCommon', 'test_noncontiguous_samples'),
@@ -13791,6 +13812,7 @@ op_db: list[OpInfo] = [
            sample_inputs_func=sample_inputs_linalg_qr_geqrf,
            decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
            supports_autograd=False,
+           dtypesIfXPU=floating_types(),
            skips=(
                # FIXME: geqrf can't forward with complex inputs that require grad
                DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_dtypes'),
@@ -13926,6 +13948,7 @@ op_db: list[OpInfo] = [
            supports_autograd=False,
            error_inputs_func=error_inputs_linspace,
            sample_inputs_func=sample_inputs_logspace,
+           decorators=(skipIfXpu,)
            skips=(
                # FX failed to normalize op - add the op to the op_skip list.
                DecorateInfo(unittest.expectedFailure, 'TestNormalizeOperators', 'test_normalize_operator_exhaustive'),
@@ -13961,6 +13984,7 @@ op_db: list[OpInfo] = [
            error_inputs_func=error_inputs_linspace,
            sample_inputs_func=sample_inputs_logspace_tensor_overload,
            variant_test_name="tensor_overload",
+           decorators=(skipIfXpu,)
            skips=(
                # FX failed to normalize op - add the op to the op_skip list.
                DecorateInfo(unittest.expectedFailure, 'TestNormalizeOperators', 'test_normalize_operator_exhaustive'),
@@ -14133,6 +14157,7 @@ op_db: list[OpInfo] = [
            check_batched_forward_grad=False,
            sample_inputs_func=sample_inputs_lu,
            decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+           dtypesIfXPU=floating_types(),
            skips=(
                # we skip jit tests because `lu` is a torch function
                # RuntimeError:
@@ -16334,7 +16359,7 @@ op_db: list[OpInfo] = [
         supports_out=True,
         supports_forward_ad=False,
         supports_autograd=False,
-        decorators=[skipCUDAIf(not SM89OrLater or TEST_WITH_ROCM, 'Requires CUDA SM >= 8.9')],
+        decorators=[skipIfXpu, skipCUDAIf(not SM89OrLater or TEST_WITH_ROCM, 'Requires CUDA SM >= 8.9')],
         skips=(
             # Sample inputs isn't really parametrized on dtype
             DecorateInfo(unittest.skip("Skipped!"), 'TestCommon', 'test_dtypes'),
@@ -16461,7 +16486,8 @@ op_db: list[OpInfo] = [
         # FIXME: mask_type == 2 (LowerRight)
         decorators=[
             skipCUDAIf(not PLATFORM_SUPPORTS_MEM_EFF_ATTENTION, "This platform doesn't support efficient attention"),
-            skipCUDAIf(TEST_WITH_ROCM, "Efficient attention on ROCM doesn't support custom_mask_type==2")],
+            skipCUDAIf(TEST_WITH_ROCM, "Efficient attention on ROCM doesn't support custom_mask_type==2"),
+            skipIfXpu],
         skips=(
             # Checking the scaler value of the philox seed and offset
             DecorateInfo(unittest.expectedFailure, 'TestCompositeCompliance', 'test_operator', device_type='cuda'),
@@ -17283,7 +17309,8 @@ op_db: list[OpInfo] = [
            supports_fwgrad_bwgrad=True,
            # In-place ops
            check_batched_gradgrad=False,
-           decorators=[skipCUDAIfNoCusolver, skipCPUIfNoLapack]),
+           decorators=[skipCUDAIfNoCusolver, skipCPUIfNoLapack],
+           dtypesIfXPU=floating_types(),),
     UnaryUfuncInfo('rad2deg',
                    ref=np.degrees,
                    decorators=(precisionOverride({torch.bfloat16: 7e-1,
@@ -17904,6 +17931,7 @@ op_db: list[OpInfo] = [
            supports_forward_ad=True,
            supports_fwgrad_bwgrad=True,
            gradcheck_wrapper=lambda *args, **kwargs: gradcheck_wrapper_triangular_input(*args, idx=1, **kwargs),
+           dtypesIfXPU=floating_types(),
            decorators=[
                skipCUDAIfNoMagma,
                skipCPUIfNoLapack,
@@ -18507,6 +18535,7 @@ op_db: list[OpInfo] = [
            supports_out=False,
            sample_inputs_func=sample_inputs_linalg_invertible,
            decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+           dtypesIfXPU=floating_types(),
            skips=(
                DecorateInfo(unittest.skip("Skipped!"), 'TestCommon', 'test_variant_consistency_eager',
                             device_type='mps', dtypes=[torch.float32]),
@@ -19286,6 +19315,7 @@ op_db: list[OpInfo] = [
            )),
     OpInfo('eye',
            dtypes=all_types_complex_float8_and(torch.bool, torch.half, torch.bfloat16),
+           dtypesIfXPU=all_types_and_complex_and(torch.bool, torch.half, torch.bfloat16),
            sample_inputs_func=sample_inputs_eye,
            error_inputs_func=error_inputs_eye,
            supports_out=True,
@@ -20829,6 +20859,9 @@ op_db: list[OpInfo] = [
             # AssertionError: Tensor-likes are not close!
             # Fails in cuda11.7
             DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_compare_cpu', device_type='cuda'),
+            # AssertionError: Tensor-likes are not close!
+            # # Fails on xpu
+            DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_compare_cpu', device_type='xpu'),
             DecorateInfo(unittest.expectedFailure, 'TestJit', 'test_variant_consistency_jit'),),),
     # In training mode, feature_alpha_dropout currently doesn't support inputs of complex dtype
     # unlike when `train=False`, it supports complex inputs, hence 2 OpInfos to cover all cases
@@ -21395,6 +21428,7 @@ op_db: list[OpInfo] = [
         dtypes=all_types_and(torch.bool, torch.float16, torch.bfloat16),
         dtypesIfCUDA=all_types_and(torch.bool, torch.float16, torch.bfloat16),
         ref=reference_hash_tensor,
+        decorators=[skipIfXpu,],
         skips=(
             # hash_tensor reduces all dimensions when dim=[] (as do sum, prod etc.)
             DecorateInfo(unittest.expectedFailure, 'TestReductions', 'test_dim_empty'),
@@ -21540,6 +21574,7 @@ op_db: list[OpInfo] = [
         supports_gradgrad=False,
         skips=(
             DecorateInfo(unittest.skip("Unsupported on MPS for now"), 'TestCommon', 'test_numpy_ref_mps'),
+            DecorateInfo(unittest.skip("Unsupported on XPU for now"), 'TestCommon', 'test_numpy_ref', device_type='xpu'),
         )
     ),
     OpInfo(
@@ -24672,6 +24707,9 @@ python_ref_db = [
             DecorateInfo(unittest.skip("Skipped!"), 'TestMathBits', 'test_conj_view'),
             DecorateInfo(unittest.skip("Skipped!"), 'TestMathBits', 'test_neg_conj_view'),
             DecorateInfo(unittest.skip("Skipped!"), 'TestMathBits', 'test_neg_view'),
+            DecorateInfo(unittest.skip("Skipped!"), 'TestCommon', 'test_python_ref_meta', 
+                         dtypes=[torch.float8_e4m3fn, torch.float8_e4m3fn, torch.float8_e5m2, 
+                                 torch.float8_e5m2fnuz, torch.float8_e8m0fnu], device_type='xpu'),
         ),
     ),
     PythonRefInfo(
