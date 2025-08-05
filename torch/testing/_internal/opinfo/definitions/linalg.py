@@ -44,6 +44,7 @@ from torch.testing._internal.common_utils import (
     slowTest,
     TEST_WITH_ROCM,
     TEST_XPU,
+    skipIfXpu,
 )
 from torch.testing._internal.opinfo.core import (
     clone_sample,
@@ -1309,7 +1310,7 @@ op_db: list[OpInfo] = [
                 dtypes=[torch.float32],
             ),
         ),
-        decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack, with_tf32_off],
+        decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack, with_tf32_off, skipIfXpu],
     ),
     OpInfo(
         "linalg.eigvals",
@@ -1452,6 +1453,7 @@ op_db: list[OpInfo] = [
                 dtypes=(torch.complex128,),
             ),
             skipCUDAIfRocm,  # regression in ROCm 6.4
+            skipIfXpu,
         ],
     ),
     OpInfo(
@@ -2006,7 +2008,7 @@ op_db: list[OpInfo] = [
         dtypes=floating_and_complex_types(),
         sample_inputs_func=sample_inputs_linalg_solve_triangular,
         supports_fwgrad_bwgrad=True,
-        skips=(skipCPUIfNoLapack,),
+        skips=(skipCPUIfNoLapack, skipIfXpu),
         # linalg.solve_triangular cannot be batched over because of a call to out.copy_(result);
         supports_forward_ad=True,
     ),
@@ -2303,6 +2305,12 @@ op_db: list[OpInfo] = [
         decorators=[
             skipCUDAIfNoMagmaAndNoCusolver,
             skipCPUIfNoLapack,
+            DecorateInfo(
+                toleranceOverride({torch.float32: tol(atol=1e-03, rtol=1e-03)}),
+                "TestCommon",
+                "test_noncontiguous_samples",
+                device_type="xpu",
+            ),
             DecorateInfo(
                 toleranceOverride({torch.float32: tol(atol=1e-03, rtol=1e-03)}),
                 "TestCommon",
