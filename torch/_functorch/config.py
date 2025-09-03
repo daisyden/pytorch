@@ -61,6 +61,10 @@ autograd_cache_allow_custom_autograd_functions: bool = Config(
 # need to add env vars or make it configurable
 bundled_autograd_cache: bool = False
 
+# Whether or not to normalize placeholder names in graphs
+# from dynaom in AOTAutogradCache
+autograd_cache_normalize_inputs = not is_fbcode()
+
 
 def remote_autograd_cache_default() -> Optional[bool]:
     if os.environ.get("TORCHINDUCTOR_AUTOGRAD_REMOTE_CACHE") == "1":
@@ -276,6 +280,17 @@ torch_compile_graph_format = os.environ.get("TORCH_COMPILE_GRAPH_FORMAT", "svg")
 # kernel mismatch is detected, bypasses by making a fake kernel from the
 # real tensor outputs.
 generate_fake_kernels_from_real_mismatches = False
+
+# When there are device mismatches in FakeTensor device propagation,
+# prefer a specific device type over others. This is particularly useful
+# in full compiled mode where intermediate tensors with device mismatches
+# represent only logical differences during compilation - these intermediate
+# tensors will never physically materialize in the binary execution, so the
+# device mismatch is not a real runtime concern. Enabling this allows the
+# compiler to proceed with compilation by choosing the preferred device type
+# for consistency. For example, set to "mtia" to prefer MTIA devices over
+# CPU, or "cuda" to prefer CUDA devices over CPU.
+fake_tensor_prefer_device_type: Optional[str] = None
 
 # CUDAGraph save run_with_rng functionalization.
 # TODO: turn on by default
