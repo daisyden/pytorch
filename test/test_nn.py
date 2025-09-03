@@ -31,7 +31,7 @@ from torch.nn import Buffer, Parameter
 from torch.nn.parallel._functions import Broadcast
 from torch.testing._internal.common_dtype import integral_types, get_all_math_dtypes, floating_types
 from torch.testing._internal.common_utils import dtype_name, freeze_rng_state, run_tests, TestCase, \
-    skipIfNoLapack, skipIfRocm, \
+    skipIfNoLapack, skipIfRocm, skipIfXpu, \
     TEST_NUMPY, TEST_SCIPY, TEST_WITH_CROSSREF, TEST_WITH_ROCM, TEST_XPU, \
     download_file, get_function_arglist, load_tests, skipIfMPS, \
     IS_PPC, \
@@ -1927,6 +1927,7 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
 
     @skipIfTorchDynamo("TorchDynamo fails here for unknown reasons")
     @set_default_dtype(torch.double)
+    @skipIfXpu
     def test_spectral_norm(self):
         input = torch.randn(3, 5)
         m = nn.Linear(5, 7)
@@ -2295,6 +2296,8 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     # Skip the test for ROCm as per https://github.com/pytorch/pytorch/issues/53190
     @skipIfRocm
+    # Skip test for XPU as the feature is not in the feature scope
+    @skipIfXpu
     def test_broadcast_double_backwards_gpu(self):
         tensors = (torch.randn(4, 4, device=device_type, requires_grad=True, dtype=torch.double),
                    torch.randn(4, 4, device=device_type, requires_grad=True, dtype=torch.double),
@@ -2304,6 +2307,7 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
                                      check_batched_grad=False)
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
+    @skipIfXpu
     def test_broadcast_not_requiring_grad(self):
         variables = [
             torch.randn(1, 2, device=device_type, requires_grad=True),
@@ -2318,6 +2322,7 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
             self.assertEqual(input_var.requires_grad, broadcasted_var.requires_grad)
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
+    @skipIfXpu
     def test_broadcast_no_grad(self):
         x = torch.randn(1, 2, dtype=torch.float32, requires_grad=True, device=device_type)
         with torch.no_grad():
@@ -9208,6 +9213,7 @@ class TestNNDeviceType(NNTestCase):
     def test_ReflectionPad_fails(self, device):
         with self.assertRaisesRegex(RuntimeError, 'Only 2D, 3D, 4D, 5D'):
             mod = torch.nn.ReflectionPad1d(2)
+            print("#### {}".format(device), flush=True)
             inp = torch.randn(3, 3, 10, 10, device=device)
             mod(inp)
 
@@ -9335,10 +9341,8 @@ class TestNNDeviceType(NNTestCase):
                 y = torch.ones(10, 0, device=device).type(torch.long)
                 mod(x, y)
 
-<<<<<<< HEAD
+
     @onlyOn(["cuda", "xpu"])
-=======
-    @onlyCUDA
     @dtypes(torch.float, torch.double)
     def test_MarginLoss_race(self, device, dtype):
         loss = torch.nn.MultiMarginLoss().to(device)
@@ -9357,8 +9361,7 @@ class TestNNDeviceType(NNTestCase):
         out_cpu.backward()
         self.assertEqual(x_cpu.grad, x.grad.cpu())
 
-    @onlyCUDA
->>>>>>> origin/daisyden/upstream_rebase
+    @onlyOn(["cuda", "xpu"])
     def test_MarginLoss_warnings(self, device):
         model = torch.nn.Linear(128, 22, device=device)
         loss = torch.nn.MultiMarginLoss()
@@ -13005,6 +13008,7 @@ if __name__ == '__main__':
     def test_transformerencoderlayer(self, device, dtype):
         if TEST_WITH_ROCM and PLATFORM_SUPPORTS_FLASH_ATTENTION and dtype == torch.half:
             self.skipTest("Skip on ROCM due to Flash Attention tolerances")
+
         # this is a deterministic test for TransformerEncoderLayer
         d_model = 4
         nhead = 2
@@ -13229,6 +13233,7 @@ if __name__ == '__main__':
     def test_transformerencoderlayer_gelu(self, device, dtype):
         if TEST_WITH_ROCM and PLATFORM_SUPPORTS_FLASH_ATTENTION and dtype == torch.half:
             self.skipTest("Skip on ROCM due to Flash Attention tolerances")
+        
         # this is a deterministic test for TransformerEncoderLayer with gelu activation
         d_model = 4
         nhead = 2
