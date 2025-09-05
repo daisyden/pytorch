@@ -8,6 +8,7 @@ import unittest
 import io
 import itertools
 import warnings
+import os
 import pickle
 import re
 from copy import deepcopy
@@ -59,11 +60,16 @@ from torch.testing._internal.common_mkldnn import reduced_f32_on_and_off
 
 AMPERE_OR_ROCM = TEST_WITH_ROCM or torch.cuda.is_tf32_supported()
 
+
 TEST_GPU = torch.cuda.is_available() or torch.xpu.is_available()
 TEST_MULTIGPU = TEST_GPU and torch.accelerator.device_count() >= 2
 device_type = (
             acc.type if (acc := torch.accelerator.current_accelerator()) else "cpu"
         )
+
+if TEST_WITH_ROCM:
+    os.environ["PYTORCH_MIOPEN_SUGGEST_NHWC"] = "1"
+
 
 # load_tests from common_utils is used to automatically filter tests for
 # sharding on sandcastle. This line silences flake warnings
@@ -7432,7 +7438,9 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
                 if bias and elementwise_affine:
                     self.assertEqual(ln.bias.grad, ln_gpu.bias.grad, f"bias grad failed: {m=} {n=}", rtol=rtol, atol=atol)
 
-    @largeTensorTest("40GB", device=device_type)
+
+    @unittest.skipIf(not TEST_CUDA and not TEST_XPU, "CUDA and XPU not available")
+    @largeTensorTest("40GB", device="cuda")
     def test_layer_norm_large_tensor(self):
         # test for https://github.com/pytorch/pytorch/issues/136291
         device = torch.device(device_type)
@@ -9211,7 +9219,7 @@ class TestNNDeviceType(NNTestCase):
 
     @onlyNativeDeviceTypes
     def test_ReflectionPad_fails(self, device):
-        with self.assertRaisesRegex(RuntimeError, 'Only 2D, 3D, 4D, 5D'):
+        with self.assertRaisesRegex(RuntimeError, r'Padding size 2 is not supported for 4D input tensor'):
             mod = torch.nn.ReflectionPad1d(2)
             print("#### {}".format(device), flush=True)
             inp = torch.randn(3, 3, 10, 10, device=device)
@@ -9221,7 +9229,7 @@ class TestNNDeviceType(NNTestCase):
             inp = torch.randn(3, 3, 10, 10, device=device)
             torch.ops.aten.reflection_pad1d(inp, (2, 2))
 
-        with self.assertRaisesRegex(RuntimeError, 'Only 2D, 3D, 4D, 5D'):
+        with self.assertRaisesRegex(RuntimeError, r'Padding size 4 is not supported for 5D input tensor'):
             mod = torch.nn.ReflectionPad2d(2)
             inp = torch.randn(3, 3, 10, 10, 10, device=device)
             mod(inp)
@@ -9230,7 +9238,7 @@ class TestNNDeviceType(NNTestCase):
             inp = torch.randn(3, 3, 10, 10, 10, device=device)
             torch.ops.aten.reflection_pad2d(inp, (2, 2, 2, 2))
 
-        with self.assertRaisesRegex(RuntimeError, 'Only 2D, 3D, 4D, 5D'):
+        with self.assertRaisesRegex(RuntimeError, r'Padding size 6 is not supported for 6D input tensor'):
             mod = torch.nn.ReflectionPad3d(3)
             inp = torch.randn(3, 3, 10, 10, 10, 10, device=device)
             mod(inp)
