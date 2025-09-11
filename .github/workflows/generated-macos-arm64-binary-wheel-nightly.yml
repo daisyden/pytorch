@@ -63,15 +63,9 @@ jobs:
           chmod +x "${RUNNER_TEMP}/conda.sh"
           /bin/bash "${RUNNER_TEMP}/conda.sh" -b -p "${RUNNER_TEMP}/anaconda"
           echo "${RUNNER_TEMP}/anaconda/bin" >> "${GITHUB_PATH}"
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_14.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          elif [ -d "/Applications/Xcode_13.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_13.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          fi
       - name: Checkout PyTorch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           path: pytorch
           show-progress: false
@@ -208,15 +202,9 @@ jobs:
           chmod +x "${RUNNER_TEMP}/conda.sh"
           /bin/bash "${RUNNER_TEMP}/conda.sh" -b -p "${RUNNER_TEMP}/anaconda"
           echo "${RUNNER_TEMP}/anaconda/bin" >> "${GITHUB_PATH}"
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_14.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          elif [ -d "/Applications/Xcode_13.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_13.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          fi
       - name: Checkout PyTorch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           path: pytorch
           show-progress: false
@@ -353,15 +341,9 @@ jobs:
           chmod +x "${RUNNER_TEMP}/conda.sh"
           /bin/bash "${RUNNER_TEMP}/conda.sh" -b -p "${RUNNER_TEMP}/anaconda"
           echo "${RUNNER_TEMP}/anaconda/bin" >> "${GITHUB_PATH}"
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_14.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          elif [ -d "/Applications/Xcode_13.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_13.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          fi
       - name: Checkout PyTorch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           path: pytorch
           show-progress: false
@@ -498,15 +480,9 @@ jobs:
           chmod +x "${RUNNER_TEMP}/conda.sh"
           /bin/bash "${RUNNER_TEMP}/conda.sh" -b -p "${RUNNER_TEMP}/anaconda"
           echo "${RUNNER_TEMP}/anaconda/bin" >> "${GITHUB_PATH}"
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_14.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          elif [ -d "/Applications/Xcode_13.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_13.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          fi
       - name: Checkout PyTorch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           path: pytorch
           show-progress: false
@@ -643,15 +619,9 @@ jobs:
           chmod +x "${RUNNER_TEMP}/conda.sh"
           /bin/bash "${RUNNER_TEMP}/conda.sh" -b -p "${RUNNER_TEMP}/anaconda"
           echo "${RUNNER_TEMP}/anaconda/bin" >> "${GITHUB_PATH}"
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_14.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          elif [ -d "/Applications/Xcode_13.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_13.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          fi
       - name: Checkout PyTorch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           path: pytorch
           show-progress: false
@@ -788,15 +758,9 @@ jobs:
           chmod +x "${RUNNER_TEMP}/conda.sh"
           /bin/bash "${RUNNER_TEMP}/conda.sh" -b -p "${RUNNER_TEMP}/anaconda"
           echo "${RUNNER_TEMP}/anaconda/bin" >> "${GITHUB_PATH}"
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_14.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          elif [ -d "/Applications/Xcode_13.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_13.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          fi
       - name: Checkout PyTorch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           path: pytorch
           show-progress: false
@@ -933,15 +897,9 @@ jobs:
           chmod +x "${RUNNER_TEMP}/conda.sh"
           /bin/bash "${RUNNER_TEMP}/conda.sh" -b -p "${RUNNER_TEMP}/anaconda"
           echo "${RUNNER_TEMP}/anaconda/bin" >> "${GITHUB_PATH}"
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_14.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          elif [ -d "/Applications/Xcode_13.3.1.app" ]; then
-            echo "DEVELOPER_DIR=/Applications/Xcode_13.3.1.app/Contents/Developer" >> "${GITHUB_ENV}"
-          fi
       - name: Checkout PyTorch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           path: pytorch
           show-progress: false
