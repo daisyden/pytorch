@@ -361,7 +361,6 @@ class TestCollectivesMultiProc(DynamoDistributedMultiProcTestCase):
                 if torch.equal(out_ref, out_compiled):
                     raise AssertionError("Expected outputs to differ due to missing wait_tensor, but they matched")
             else:
-
                 print("XPU detected - skipping output mismatch check (all reduce likely completed synchronously")
 
             #self.assertNotEqual(out_ref, out_compiled)
