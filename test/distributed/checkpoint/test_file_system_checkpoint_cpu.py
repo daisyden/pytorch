@@ -293,7 +293,6 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
     def load_tensor(self, tensor: ShardedTensor) -> torch.Tensor:
         backend = dist.get_backend()
         rank = dist.get_rank()
-
         if backend == "xccl":
             out = torch.zeros(tensor.shape, device="xpu:0") if rank == 0 else None
             tensor.gather(out=out)
