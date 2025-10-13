@@ -39,11 +39,20 @@ class TestFullyShardGradientScaler(FSDPTest):
         input = torch.randn([4, 4], device=device_type)
 
         if test_2d:
+            dp, tp = None, None
+            
+            for i in range(1, int(self.world_size ** 0.5) + 1):
+                if self.world_size % i == 0:
+                    r_dp, r_tp = i, self.world_size // i
+                    if r_tp >= 2:  
+                        dp, tp = r_dp, r_tp
+            
+            assert dp is not None and tp is not None, f"No valid 2D mesh for world_size={self.world_size}"
             mesh_2d = init_device_mesh(
-                device_type.type, (2, self.world_size // 2), mesh_dim_names=("dp", "tp")
+                device_type.type, (dp, tp), mesh_dim_names=("dp", "tp")
             )
             dp_mesh, tp_mesh = mesh_2d["dp"], mesh_2d["tp"]
-            model = nn.Sequential(MLP(2), MLP(2), MLP(2))
+            model = nn.Sequential(MLP(tp), MLP(tp), MLP(tp))
             tp_parallelize_plan = {
                 "0.in_proj": ColwiseParallel(),
                 "0.out_proj": RowwiseParallel(),
@@ -60,7 +69,7 @@ class TestFullyShardGradientScaler(FSDPTest):
             for module in model:
                 fully_shard(module, mesh=dp_mesh)
             fully_shard(model, mesh=dp_mesh)
-            input = torch.randn((2,), device=device_type)
+            input = torch.randn((2,tp), device=device_type)
 
         loss = model(input).sum()
         scaler = GradScaler(init_scale=2.0, enabled=True, device=device_type.type)
