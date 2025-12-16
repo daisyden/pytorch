@@ -75,6 +75,13 @@ ADD ./common/install_ucc.sh install_ucc.sh
 RUN if [ -n "${UCX_COMMIT}" ] && [ -n "${UCC_COMMIT}" ]; then bash ./install_ucc.sh; fi
 RUN rm install_ucc.sh
 
+# (optional) Install vision packages like OpenCV
+ARG VISION
+COPY ./common/install_vision.sh ./common/cache_vision_models.sh ./common/common_utils.sh ./
+RUN if [ -n "${VISION}" ]; then bash ./install_vision.sh; fi
+RUN rm install_vision.sh cache_vision_models.sh common_utils.sh
+ENV INSTALLED_VISION ${VISION}
+
 # (optional) Install non-default Ninja version
 ARG NINJA_VERSION
 COPY ./common/install_ninja.sh install_ninja.sh
@@ -138,11 +145,11 @@ RUN rm install_halide.sh common_utils.sh halide.txt
 
 ARG PALLAS
 ARG CUDA_VERSION
-# Install JAX with CUDA support (for Pallas)
+# Install JAX (for Pallas) - with CUDA support if CUDA_VERSION is set, otherwise CPU-only
 COPY ./common/install_jax.sh install_jax.sh
 COPY ./common/common_utils.sh common_utils.sh
 COPY ./ci_commit_pins/jax.txt /ci_commit_pins/jax.txt
-RUN if [ -n "${PALLAS}" ]; then bash ./install_jax.sh ${CUDA_VERSION}; fi
+RUN if [ -n "${PALLAS}" ]; then bash ./install_jax.sh ${CUDA_VERSION:-cpu}; fi
 RUN rm -f install_jax.sh common_utils.sh /ci_commit_pins/jax.txt
 
 ARG ONNX
