@@ -44,7 +44,7 @@ from torch.testing._internal.common_nn import NNTestCase, NewModuleTest, Criteri
     module_tests, criterion_tests, loss_reference_fns, _create_basic_net, \
     ctcloss_reference, get_new_module_tests, single_batch_reference_fn, _test_bfloat16_ops, _test_module_empty_input
 from torch.testing._internal.common_device_type import dtypesIfMPS, instantiate_device_type_tests, dtypes, \
-    dtypesIfCUDA, precisionOverride, onlyCUDA, onlyCPU, \
+    dtypesIfCUDA, precisionOverride, onlyCUDA, onlyCPU, onlyOn, \
     skipCUDAIfRocm, skipCUDAIf, skipCUDAIfNotRocm, \
     onlyNativeDeviceTypes, deviceCountAtLeast, largeTensorTest, expectedFailureMeta, expectedFailureMPS, \
     skipMeta, get_all_device_types, TEST_XPU
@@ -1926,7 +1926,6 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
         m = pickle.loads(pickle.dumps(m))
         self.assertIsInstance(m, nn.Linear)
 
-    @skipIfXpu
     @skipIfTorchDynamo("TorchDynamo fails here for unknown reasons")
     @set_default_dtype(torch.double)
     def test_spectral_norm(self):
@@ -2294,7 +2293,6 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
         inputs = torch.randn((), requires_grad=True)
         self.assertTrue(gradcheck(lambda x: F.normalize(x, p=1, dim=-1), (inputs,)))
 
-    @skipIfXpu
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_data_parallel_with_empty_parameter_shapes(self):
         class MyModule(nn.Module):
@@ -2328,7 +2326,6 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
         _assertGradAndGradgradChecks(self, lambda *i: Broadcast.apply((0, 1), *i), tensors,
                                      check_batched_grad=False)
 
-    @skipIfXpu
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_broadcast_not_requiring_grad(self):
         variables = [
@@ -2343,7 +2340,6 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
             input_var = variables[output_idx % len(variables)]
             self.assertEqual(input_var.requires_grad, broadcasted_var.requires_grad)
 
-    @skipIfXpu
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_broadcast_no_grad(self):
         x = torch.randn(1, 2, dtype=torch.float32, requires_grad=True, device=device_type)
@@ -8730,9 +8726,10 @@ class TestNNDeviceType(NNTestCase):
 
         self.assertEqual(scipy_ary, gridsample_ary.reshape_as(scipy_ary))
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("60GB", "cpu")
     @largeTensorTest("16GB", "cuda")
+    @largeTensorTest("16GB", "xpu")
     def test_avg_pool_large_tensor(self, device):
         # test for https://github.com/pytorch/pytorch/issues/113833
         a = torch.randn(128, 256, 256, 256, dtype=torch.half, device=device, requires_grad=True)
@@ -8746,8 +8743,9 @@ class TestNNDeviceType(NNTestCase):
         # workaround for memory usage overhead of assertEqual
         self.assertTrue(torch.allclose(a.grad.cpu(), a_cpu.grad.half()))
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("20GB", device="cuda")
+    @largeTensorTest("20GB", device="xpu")
     def test_large_max_pool2d_ch_last(self, device):
         # https://github.com/pytorch/pytorch/issues/165297
         N, C, H, W = 70, 64, 512, 960  # dims to extend > int32
@@ -8758,17 +8756,18 @@ class TestNNDeviceType(NNTestCase):
         y_cuda_contig = pool(x_cuda.contiguous())
         self.assertEqual(y_cuda_ch_last, y_cuda_contig)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_large_reflect_pad(self, device):
         # https://github.com/pytorch/pytorch/issues/165861
-        x = torch.rand(2**16, 2, device="cuda")
+        x = torch.rand(2**16, 2, device=device_type)
         c = F.pad(x, (1, 1), mode="reflect")
         c_cpu = F.pad(x.cpu(), (1, 1), mode="reflect")
         self.assertEqual(c, c_cpu)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("48GB", "cpu")
     @largeTensorTest("48GB", "cuda")
+    @largeTensorTest("48GB", "xpu")
     def test_avg_pool_large_tensor2(self, device):
         # test for https://github.com/pytorch/pytorch/issues/129785
         out_size = [2048, 64, 104, 79]
@@ -8786,9 +8785,10 @@ class TestNNDeviceType(NNTestCase):
         # reduce memory usage
         self.assertEqual(inp.grad.sum(), inp_cpu.grad.sum())
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("24GB", "cpu")
     @largeTensorTest("24GB", "cuda")
+    @largeTensorTest("24GB", "xpu")
     def test_large_max_pool_contig(self, device):
         # test for https://github.com/pytorch/pytorch/issues/167253
         size = [74, 32, 24300, 40]
@@ -8922,7 +8922,7 @@ class TestNNDeviceType(NNTestCase):
             self.assertEqual(scipy_ary, gridsample_ary.reshape_as(scipy_ary))
 
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.float, torch.half)
     def test_batchnorm_large_batch(self, device, dtype):
         bn = nn.BatchNorm2d(1).to(device, dtype)
@@ -9592,7 +9592,7 @@ class TestNNDeviceType(NNTestCase):
             inp = torch.randn(3, 3, 10, 10, 10, 10, device=device)
             torch.ops.aten.reflection_pad3d(inp, (2, 2, 2, 2, 2, 2))
 
-    @onlyCUDA   # Test if CPU and GPU results match
+    @onlyOn(['cuda', 'xpu'])   # Test if CPU and GPU results match
     def test_ReflectionPad2d_large(self, device):
         shapes = ([2, 65736, 6, 6], [65736, 2, 6, 6])
         pad = (1, 2, 3, 4)
@@ -9613,7 +9613,7 @@ class TestNNDeviceType(NNTestCase):
 
             self.assertEqual(x.grad, ref_x.grad)
 
-    @onlyCUDA   # Test if CPU and GPU results match with deterministic mode on
+    @onlyOn(['cuda', 'xpu'])   # Test if CPU and GPU results match with deterministic mode on
     def test_ReflectionPad2d_large_deterministic(self, device):
         original_deterministic = torch.are_deterministic_algorithms_enabled()
         try:
@@ -9645,7 +9645,7 @@ class TestNNDeviceType(NNTestCase):
         inp = torch.ones(0, 5, 24, 24, device=device)
         _test_module_empty_input(self, mod, inp, check_size=False)
 
-    @onlyCUDA   # Test if CPU and GPU results match
+    @onlyOn(['cuda', 'xpu'])   # Test if CPU and GPU results match
     def test_ReflectionPad3d_large(self, device):
         shapes = ([2, 1000, 7, 7, 7], [1000, 2, 7, 7, 7])
         pad = (1, 2, 3, 4, 5, 6)
@@ -9694,7 +9694,7 @@ class TestNNDeviceType(NNTestCase):
                 y = torch.ones(10, 0, device=device).type(torch.long)
                 mod(x, y)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])   # Test if CPU and GPU results match
     @dtypes(torch.float, torch.double)
     def test_MarginLoss_race(self, device, dtype):
         loss = torch.nn.MultiMarginLoss().to(device)
@@ -9713,7 +9713,7 @@ class TestNNDeviceType(NNTestCase):
         out_cpu.backward()
         self.assertEqual(x_cpu.grad, x.grad.cpu())
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])   # Test if no warnings are raised
     def test_MarginLoss_warnings(self, device):
         model = torch.nn.Linear(128, 22, device=device)
         loss = torch.nn.MultiMarginLoss()
@@ -9726,7 +9726,7 @@ class TestNNDeviceType(NNTestCase):
             l.backward()
         self.assertTrue(len(f.getvalue()) == 0)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_mse_loss_error(self, device):
         i = torch.randn((10, 1), device=device)
         t = torch.randn((10,))
@@ -9745,7 +9745,7 @@ class TestNNDeviceType(NNTestCase):
             unfold = torch.nn.Unfold(kernel_size=(2, 3)).to(device)
             unfold(inp)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @skipIfRocmArch(MI300_ARCH)
     @dtypes(torch.float, torch.double)
     @tf32_on_and_off(0.005)
@@ -9814,6 +9814,7 @@ class TestNNDeviceType(NNTestCase):
                     else:
                         self.assertEqual(hx.grad, hx_device.grad)
 
+    @skipIfXpu(msg="XPU does not work with cudnn")
     @dtypes(torch.double)
     @dtypesIfMPS(torch.float)
     def test_BatchNorm_empty(self, device, dtype):
@@ -9829,7 +9830,7 @@ class TestNNDeviceType(NNTestCase):
         self.assertEqual(mod.weight.grad, torch.tensor([0., 0, 0], device=device))
         self.assertEqual(mod.bias.grad, torch.tensor([0., 0, 0], device=device))
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest('16GB')
     def test_prelu_backward_32bit_indexing(self, device):
         m = torch.nn.PReLU().to(device_type).half()
@@ -10558,6 +10559,7 @@ class TestNNDeviceType(NNTestCase):
         self.assertEqual(expected_out.expand([*shape[:2], 2, 2]), t_out)
 
     # Partially passes. NotImplementedError: aten::upsample_bicubic2d.out https://github.com/pytorch/pytorch/issues/77764
+    @skipIfXpu(msg='NotImplementedError: "upsample_bicubic2d_xpu" not implemented for Byte')
     @skipIfMPS
     @parametrize_test("memory_format", [torch.contiguous_format, torch.channels_last])
     @parametrize_test("mode", ["bilinear", "bicubic"])
@@ -10642,6 +10644,7 @@ class TestNNDeviceType(NNTestCase):
 
             self.assertLess(diff.mean(), 0.4)
 
+    @skipIfXpu(msg="NotImplementedError: "upsample_bilinear2d_xpu" not implemented for 'Byte'")
     @parametrize_test("memory_format", [torch.contiguous_format, torch.channels_last])
     @parametrize_test("align_corners", [True, False])
     @parametrize_test("input_size, output_size", [(399, 437), (403, 377)])
@@ -10735,7 +10738,7 @@ class TestNNDeviceType(NNTestCase):
             gradcheck(lambda x: F.interpolate(x, out_size, **kwargs), [input])
             gradgradcheck(lambda x: F.interpolate(x, out_size, **kwargs), [input])
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @skipCUDAIfRocm(msg="launch bounds error out on ROCM")
     @dtypes(torch.half, torch.bfloat16)
     @largeTensorTest('40GB')
@@ -10750,7 +10753,7 @@ class TestNNDeviceType(NNTestCase):
         out = torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')
         self.assertEqual(out[0], out[-1])
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.half)
     @largeTensorTest('40GB')
     def test_replicatepad_64bit_indexing(self, device, dtype):
@@ -10759,7 +10762,7 @@ class TestNNDeviceType(NNTestCase):
         y = conv(x)
         torch.mean(y).backward()
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.half)
     @largeTensorTest('40GB')
     def test_upsamplingnearest2d_backward_64bit_indexing(self, device, dtype):
@@ -10827,7 +10830,7 @@ class TestNNDeviceType(NNTestCase):
                         exact_dtype=True
                     )
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @gcIfJetson
     def test_masked_softmax_devices_parity(self):
         # Test that softmax with mask type 0 (LxL attention mask), mask type 1 (BxL padding mask),
@@ -10978,7 +10981,7 @@ class TestNNDeviceType(NNTestCase):
                     mask = mask.to(device_type)
                 self._test_masked_softmax_helper(input, dim, mask, mask_type)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_masked_softmax_transformer_layout(self, device):
         B = 211
         num_heads = 16
@@ -10999,7 +11002,7 @@ class TestNNDeviceType(NNTestCase):
         pt_res = self._slow_masked_softmax(input, mask)
         self.assertEqual(pt_res, native_res, exact_dtype=True)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_masked_softmax_TxT_layout(self, device):
         B = 211
         num_heads = 16
@@ -11083,7 +11086,7 @@ class TestNNDeviceType(NNTestCase):
                         self.assertEqual(grad_input, ref_grad_input)
                         self.assertEqual(input.grad, ref_input.grad)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.float, torch.half)
     @largeTensorTest("20GB")
     @largeTensorTest("64GB", "cpu")
@@ -11106,7 +11109,7 @@ class TestNNDeviceType(NNTestCase):
         run_test(1100000000, 2)  # Illegal memory access https://github.com/pytorch/pytorch/issues/52715
         run_test(2200000000, 1)  # invalid configuration argument https://github.com/pytorch/pytorch/issues/52716
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.double)
     def test_softmax_double(self, device, dtype):
         logits = torch.randn(5, 513, dtype=dtype, device=device)
@@ -11124,7 +11127,7 @@ class TestNNDeviceType(NNTestCase):
         out_cpu.backward(grad.detach().cpu())
         self.assertEqual(logits.grad, logits_cpu.grad)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.half)
     @largeTensorTest("20GB")
     @largeTensorTest("2GB", "cpu")
@@ -11175,7 +11178,7 @@ class TestNNDeviceType(NNTestCase):
         result = loaded_model(x)
         self.assertEqual(result, expected)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @tf32_on_and_off(0.005)
     def test_grid_sample_large(self, device):
         def issue_35202():
@@ -11185,7 +11188,7 @@ class TestNNDeviceType(NNTestCase):
             result = torch.nn.functional.grid_sample(input_tensor, coords)
             self.assertEqual(result, torch.tensor([[[[0., 0.]]]], dtype=torch.float, device=device))
             result.backward(torch.ones_like(result))
-            torch.cuda.synchronize()
+            torch.get_device_module(device).synchronize()
         issue_35202()
 
         def issue_24823_1(dtype):
@@ -11216,7 +11219,10 @@ class TestNNDeviceType(NNTestCase):
             result = torch.nn.functional.grid_sample(img, grid)
             self.assertEqual(result, torch.zeros(1, 1, 4, 4, device=device, dtype=torch.float))
             result.backward(torch.ones_like(result))
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elif torch.xpu.is_available():
+                torch.xpu.synchronize()
         issue_24823_2()
 
     @dtypes(torch.float, torch.double)
@@ -11307,14 +11313,14 @@ class TestNNDeviceType(NNTestCase):
             small_image.grad.zero_()
             large_view.grad.zero_()
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_grid_sample_half_precision(self):
         def helper(shape_in, shape_out, align_corners):
             for mode in ('bilinear', 'nearest', 'bicubic'):
                 if len(shape_in) != 4 and mode == 'bicubic':
                     continue
-                data = torch.randn(shape_in, device='cuda', dtype=torch.half)
-                grid = torch.rand(shape_out, device='cuda', dtype=torch.half) * 2.0 - 1.0
+                data = torch.randn(shape_in, device=device_type, dtype=torch.half)
+                grid = torch.rand(shape_out, device=device_type, dtype=torch.half) * 2.0 - 1.0
 
                 out_half = F.grid_sample(data, grid, mode=mode, padding_mode='zeros', align_corners=align_corners)
                 out_double = F.grid_sample(data.double(), grid.double(), mode=mode, padding_mode='zeros',
@@ -11327,14 +11333,14 @@ class TestNNDeviceType(NNTestCase):
         helper((32, 64, 16, 16), (32, 8, 8, 2), False)
         helper((32, 64, 16, 16, 16), (32, 8, 8, 8, 3), False)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_grid_sample_bfloat16_precision(self):
         def helper(shape_in, shape_out, align_corners):
             for mode in ('bilinear', 'nearest', 'bicubic'):
                 if len(shape_in) != 4 and mode == 'bicubic':
                     continue
-                data = torch.randn(shape_in, device='cuda', dtype=torch.bfloat16)
-                grid = torch.rand(shape_out, device='cuda', dtype=torch.bfloat16) * 2.0 - 1.0
+                data = torch.randn(shape_in, device=device_type, dtype=torch.bfloat16)
+                grid = torch.rand(shape_out, device=device_type, dtype=torch.bfloat16) * 2.0 - 1.0
 
                 out_half = F.grid_sample(data, grid, mode=mode, padding_mode='zeros', align_corners=align_corners)
                 out_double = F.grid_sample(data.double(), grid.double(), mode=mode, padding_mode='zeros',
@@ -11441,7 +11447,7 @@ class TestNNDeviceType(NNTestCase):
             with torch.backends.cudnn.flags(enabled=False):
                 self._test_rnn_retain_variables(device, dtype)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.double)
     def test_lstmcell_backward_only_one_output_grad(self, device, dtype):
         # checks that undefined gradients doesn't hamper the backward
@@ -11535,7 +11541,7 @@ class TestNNDeviceType(NNTestCase):
         assert torch.allclose(der_out1, der_out2)
         assert torch.allclose(x1.grad, x2.grad)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_upsamplingNearest1d_launch_config(self, device):
         m = nn.Upsample(scale_factor=2)
         inp = torch.rand(2**25, 1, 1, device=device)
@@ -11544,7 +11550,7 @@ class TestNNDeviceType(NNTestCase):
         out_ref = m(inp_ref)
         self.assertEqual(out_ref, out)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_upsamplingNearest2d_launch_config(self, device):
         m = nn.Upsample(scale_factor=2)
         inp = torch.rand(2**25, 1, 1, 1, device=device)
@@ -11553,17 +11559,17 @@ class TestNNDeviceType(NNTestCase):
         out_ref = m(inp_ref)
         self.assertEqual(out_ref, out)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.half, torch.bfloat16)
     def test_cudnn_rnn(self, dtype):
-        rnn = nn.RNN(10, 20, num_layers=2, device='cuda', dtype=dtype)
-        input = torch.randn(5, 4, 10, device='cuda', dtype=dtype)
-        hx = torch.randn(2, 4, 20, device='cuda', dtype=dtype)
+        rnn = nn.RNN(10, 20, num_layers=2, device=device_type, dtype=dtype)
+        input = torch.randn(5, 4, 10, device=device_type, dtype=dtype)
+        hx = torch.randn(2, 4, 20, device=device_type, dtype=dtype)
         output = rnn(input, hx)
         output_ref = rnn.cpu()(input.cpu(), hx.cpu())
         self.assertEqual(tuple([i.to(device_type) for i in output_ref]), output, atol=5e-3, rtol=1e-3)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @gcIfJetson
     def test_upsamplingNearest3d_launch_config(self, device):
         m = nn.Upsample(scale_factor=2)
@@ -11575,14 +11581,14 @@ class TestNNDeviceType(NNTestCase):
 
     @unittest.expectedFailure
     @skipIfRocm
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_upsamplingNearest2d_launch_fail(self, device):
         m = nn.Upsample(scale_factor=2)
         # launch grid_y == 2**16 (larger than maximum y-dimension limit 65535)
         inp = torch.rand(1, 1, 2**15, 2**8, device=device)
         out = m(inp)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @skipCUDAIfNotRocm
     def test_upsamplingNearest2d_launch_rocm(self, device):
         # test_upsamplingNearest2d_launch_fail should run OK on ROCm
@@ -11719,20 +11725,23 @@ class TestNNDeviceType(NNTestCase):
         padded_tensor = rnn_utils.pad_sequence(ordered)
         return padded_tensor, lengths
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_device_mask(self, device):
         for enforce_sorted in [True, False]:
             padded, lengths = self._padded_sequence('cpu', torch.float)
             packed = rnn_utils.pack_padded_sequence(
                 padded, lengths, enforce_sorted=enforce_sorted)
-            self.assertFalse(packed.is_cuda)
+            if device == 'cuda':
+                self.assertFalse(packed.is_cuda)
             packed = packed.to(device)
-            self.assertTrue(packed.is_cuda)
+            if device == 'cuda':
+                self.assertTrue(packed.is_cuda)
             unpacked, _ = rnn_utils.pad_packed_sequence(packed)
-            self.assertTrue(unpacked.is_cuda)
+            if device == 'cuda':
+                self.assertTrue(unpacked.is_cuda)
             self.assertEqual(unpacked.dtype, torch.float)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_overwrite_module_params_on_conversion_cpu_device(self, device):
         # Test that under the current default settings
         # (`torch.__future__.get_overwrite_module_params_on_conversion() == False`),
@@ -11746,7 +11755,7 @@ class TestNNDeviceType(NNTestCase):
             # (Issue is filed at https://github.com/pytorch/pytorch/issues/21875)
             mw[0][0] = 5
             self.assertTrue(mw[0][0].device.type == "cpu")
-            self.assertTrue(mw._base[0][0].device.type == "cuda")
+            self.assertTrue(mw._base[0][0].device.type == device)
 
         try:
             torch.__future__.set_overwrite_module_params_on_conversion(True)
@@ -11774,7 +11783,7 @@ class TestNNDeviceType(NNTestCase):
         finally:
             torch.__future__.set_overwrite_module_params_on_conversion(False)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.half, torch.float)
     def test_softmax(self, device, dtype):
         input = torch.rand(32, 100, device=device, dtype=dtype, requires_grad=True)
@@ -11809,27 +11818,27 @@ class TestNNDeviceType(NNTestCase):
             with torch.backends.cudnn.flags(enabled=False):
                 self._test_batchnorm_grad(device)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_layernorm_half_precision(self):
         width = 128
-        input = torch.rand(1, 5, width, device="cuda", dtype=torch.half) * 0.1
+        input = torch.rand(1, 5, width, device=device_type, dtype=torch.half) * 0.1
         normalized_shape = (width,)
-        weight = torch.ones(width, device="cuda", dtype=torch.half)
-        bias = torch.zeros(width, device="cuda", dtype=torch.half)
+        weight = torch.ones(width, device=device_type, dtype=torch.half)
+        bias = torch.zeros(width, device=device_type, dtype=torch.half)
         eps = 1e-5
 
         output_fp16 = torch.layer_norm(input, normalized_shape, weight, bias, eps)
         output_fp32 = torch.layer_norm(input.float(), normalized_shape, weight.float(), bias.float(), eps).half()
         self.assertEqual(output_fp16, output_fp32, atol=0, rtol=0)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_layernorm_weight_bias(self):
         width = 128
-        input = torch.rand(1, 5, width, device="cuda", dtype=torch.float32) * 0.1
+        input = torch.rand(1, 5, width, device=device_type, dtype=torch.float32) * 0.1
         normalized_shape = (width,)
-        data = torch.randn(width, device="cuda", dtype=torch.float32)
-        weight = torch.ones(width, device="cuda", dtype=torch.float32)
-        bias = torch.zeros(width, device="cuda", dtype=torch.float32)
+        data = torch.randn(width, device=device_type, dtype=torch.float32)
+        weight = torch.ones(width, device=device_type, dtype=torch.float32)
+        bias = torch.zeros(width, device=device_type, dtype=torch.float32)
         eps = 1e-5
 
         out_none_weight = torch.layer_norm(input, normalized_shape, None, data, eps)
@@ -11929,7 +11938,7 @@ class TestNNDeviceType(NNTestCase):
                 self._test_batchnorm_eval(2, device, dtype)
                 self._test_batchnorm_eval(3, device, dtype)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.bfloat16, torch.half)
     def test_batchnorm_eval_mixed(self, device, dtype):
         # Test bfloat16 input with float module
@@ -11978,7 +11987,7 @@ class TestNNDeviceType(NNTestCase):
                 self._test_batchnorm_affine(2, device, dtype)
                 self._test_batchnorm_affine(3, device, dtype)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.bfloat16, torch.half)
     def test_batchnorm_affine_mixed(self, device, dtype):
         cudnn_enabled = [False]
@@ -12045,7 +12054,7 @@ class TestNNDeviceType(NNTestCase):
             with torch.backends.cudnn.flags(enabled=False):
                 self._test_batchnorm_simple_average(device, dtype)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.bfloat16, torch.half)
     def test_batchnorm_simple_average_mixed(self, device, dtype):
         self._test_batchnorm_simple_average(device, dtype, torch.float)
@@ -12142,13 +12151,13 @@ class TestNNDeviceType(NNTestCase):
         num_labels = 101
         target_length = 15
         targets = torch.randint(1, num_labels, (batch_size * target_length,),
-                                device='cuda', dtype=torch.long)
-        log_probs = torch.log_softmax(torch.randn(input_length, batch_size, num_labels, device='cuda', dtype=torch.float), 2)
+                                device=device, dtype=torch.long)
+        log_probs = torch.log_softmax(torch.randn(input_length, batch_size, num_labels, device=device, dtype=torch.float), 2)
         log_probs.requires_grad_()
 
         input_lengths = batch_size * [input_length]
         target_lengths = batch_size * [target_length]
-        grad_out = torch.randn(batch_size, device='cuda', dtype=torch.float)
+        grad_out = torch.randn(batch_size, device=device, dtype=torch.float)
         with torch.backends.cudnn.flags(enabled=False):
             loss_native = torch.nn.functional.ctc_loss(log_probs, targets, input_lengths, target_lengths, reduction='none')
             grad_native, = torch.autograd.grad(loss_native, log_probs, grad_out)
@@ -12156,8 +12165,9 @@ class TestNNDeviceType(NNTestCase):
                                                   input_lengths, target_lengths, reduction='none')
         # ROCm uses MIOpen (MiopenCtcLossBackward), CUDA uses cuDNN (CudnnCtcLossBackward)
         grad_fn_str = str(loss_cudnn.grad_fn)
-        self.assertTrue("Miopen" in grad_fn_str or "Cudnn" in grad_fn_str,
-                        f"Expected MiopenCtcLossBackward or CudnnCtcLossBackward, got {grad_fn_str}")
+        if device == 'cuda':
+            self.assertTrue("Miopen" in grad_fn_str or "Cudnn" in grad_fn_str,
+                            f"Expected MiopenCtcLossBackward or CudnnCtcLossBackward, got {grad_fn_str}")
         grad_cudnn, = torch.autograd.grad(loss_cudnn, log_probs, grad_out)
         self.assertEqual(grad_cudnn, grad_native, atol=1e-4, rtol=0)
 
@@ -12191,7 +12201,7 @@ class TestNNDeviceType(NNTestCase):
         grad_cudnn, = torch.autograd.grad(loss_cudnn, log_probs, grad_out)
         self.assertEqual(grad_cudnn, grad_native, atol=1e-4, rtol=0)
 
-    @onlyCUDA
+    
     def test_ctc_loss_cudnn_tensor_cpu_length_cuda(self):
         # batch size
         N = 50
@@ -12202,7 +12212,7 @@ class TestNNDeviceType(NNTestCase):
         # max text length
         S = 10
 
-        prob_device = torch.device("cuda")
+        prob_device = torch.device(device_type)
         other_device = torch.device("cpu")
         other_dtype = torch.int32
 
@@ -12395,7 +12405,7 @@ class TestNNDeviceType(NNTestCase):
             test_helper(torch.nn.Hardtanh(), device, shape)
             test_helper(torch.nn.LeakyReLU(), device, shape)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_activations_bfloat16(self, device):
         _test_bfloat16_ops(self, torch.nn.ReLU(), device, inp_dims=(5), prec=1e-2)
         _test_bfloat16_ops(self, torch.nn.Threshold(0.1, 20), device, inp_dims=(5), prec=1e-2)
@@ -12460,9 +12470,10 @@ class TestNNDeviceType(NNTestCase):
                 F.nll_loss(x, t, weight=weight)
 
     # Ref: https://github.com/pytorch/pytorch/issues/85005
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("120GB", "cpu")
     @largeTensorTest("45GB", "cuda")
+    @largeTensorTest("45GB", "xpu")
     @parametrize_test("reduction", ("none", "mean", "sum"))
     def test_nll_loss_large_tensor(self, device, reduction):
         shape = [int(2 ** 16), int(2 ** 16) + 1]
@@ -12493,9 +12504,10 @@ class TestNNDeviceType(NNTestCase):
                 self.assertTrue(torch.allclose(input.grad.cpu(), input_cpu.grad, rtol=rtol, atol=atol))
 
     # Ref: https://github.com/pytorch/pytorch/issues/108345
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("20GB", "cpu")
     @largeTensorTest("20GB", "cuda")
+    @largeTensorTest("20GB", "xpu")
     @parametrize_test("reduction", ("none", "mean", "sum"))
     def test_cross_entropy_64bit(self, device, reduction):
         labels = torch.zeros(190, 50, dtype=torch.long, device=device)
@@ -12599,7 +12611,7 @@ class TestNNDeviceType(NNTestCase):
             self.assertEqual(result_long, result_byte)
             self.assertEqual(grad_long, grad_byte)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @dtypes(torch.float16, torch.float32)
     def test_cross_entropy_loss_2d_out_of_bounds_class_index(self, device, dtype):
         # Test for issue #117532
@@ -12629,7 +12641,10 @@ class TestThatContainsCUDAAssert(TestCase):
         x = F.cross_entropy(
             pred, labels, reduction="none", ignore_index=ignore_index
         )
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elif torch.xpu.is_available():
+            torch.xpu.synchronize()
 
 
 if __name__ == '__main__':
@@ -12861,13 +12876,14 @@ if __name__ == '__main__':
                 check_equal(loss, (inp1, targ_positive_ignore_index), (inp2[1:], targ_positive_ignore_index[1:]))
 
     # Ref: https://github.com/pytorch/pytorch/issues/85005
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("120GB", "cpu")
     @largeTensorTest("70GB", "cuda")
+    @largeTensorTest("70GB", "xpu")
     @parametrize_test("reduction", ("none", "mean", "sum"))
     def test_cross_entropy_large_tensor(self, device, reduction):
-        logits = torch.randn(int(2 ** 16), int(2 ** 16) + 1, dtype=torch.float32, device='cuda', requires_grad=True)
-        labels = torch.zeros(logits.size(0), dtype=torch.long, device='cuda')
+        logits = torch.randn(int(2 ** 16), int(2 ** 16) + 1, dtype=torch.float32, device=device, requires_grad=True)
+        labels = torch.zeros(logits.size(0), dtype=torch.long, device=device)
         loss = F.cross_entropy(logits, labels, reduction=reduction)
         if reduction != "none":
             loss.backward()
@@ -13067,7 +13083,7 @@ if __name__ == '__main__':
                 for norm_type, scalar in product(norms_finite, scalars):
                     run_test_case(norm_type, error_if_nonfinite, scalar, grad_only_one_elem, prefix_finite_grad_param, False)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @deviceCountAtLeast(2)
     @parametrize_test('foreach', (False, True))
     def test_clip_grad_norm_multi_device(self, devices, foreach):
@@ -13850,8 +13866,9 @@ if __name__ == '__main__':
             self.assertEqual(str(w[0].message), "`parameters` is an empty generator, no gradient clipping will occur.")
 
     # reference issue: https://github.com/pytorch/pytorch/issues/111484
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("42GB", "cuda")
+    @largeTensorTest("42GB", "xpu")
     def test_softmax_forward_64bit_indexing(self, device):
         batch_size = 70
         seq_len = 2048
@@ -13864,8 +13881,9 @@ if __name__ == '__main__':
         rtol, atol = torch.testing._comparison.get_tolerances(torch.float16, rtol=None, atol=None)
         self.assertEqual(nll, torch.ones_like(nll) * torch.log(torch.tensor(vocab_size)), rtol=rtol, atol=atol)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     @largeTensorTest("20GB", "cuda")
+    @largeTensorTest("20GB", "xpu")
     def test_softmax_backward_64bit_indexing(self, device):
         for numel in (2147483650, 2147483650 + 1):
             x = torch.ones([1, 1, numel], device=device, dtype=torch.float16)
@@ -13873,7 +13891,7 @@ if __name__ == '__main__':
             out = torch._softmax_backward_data(x, x, 2, x.dtype)
             self.assertEqual(out[0, 0, 0], 1 / numel)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_softmax_backward_smem(self, device):
         torch.manual_seed(0)
         # We use smem for tensors that have > 1024 elements and size >= 4096 bytes.
@@ -13885,7 +13903,7 @@ if __name__ == '__main__':
             expected_result = torch._softmax_backward_data(grad_output.cpu(), output.cpu(), 0, dtype)
             self.assertEqual(expected_result, result)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_softmax_backward_without_fully_vectorized(self, device):
         torch.manual_seed(0)
         # We don't use smem here because the size of the elements does not divide
@@ -13908,7 +13926,7 @@ if __name__ == '__main__':
         self.assertNotEqual(unaligned_output.data_ptr() % 16, 0)
         return unaligned_output
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_softmax_backward_unaligned_output(self, device):
         torch.manual_seed(0)
         # We don't use smem here because the output is not aligned to 16 bytes.
@@ -13920,7 +13938,7 @@ if __name__ == '__main__':
             expected_result = torch._softmax_backward_data(grad_output.cpu(), unaligned_output.cpu(), 0, dtype)
             self.assertEqual(expected_result, result)
 
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_softmax_backward_unaligned_grad_output(self, device):
         torch.manual_seed(0)
         numel = 2048
@@ -13932,7 +13950,7 @@ if __name__ == '__main__':
             self.assertEqual(expected_result, result)
 
     # reference issue: https://github.com/pytorch/pytorch/issues/68248
-    @onlyCUDA
+    @onlyOn(['cuda', 'xpu'])
     def test_adaptiveavg_pool1d_shmem(self, device):
         x = torch.randn(1, 256, 1, 5000, device=device).to(memory_format=torch.channels_last)
         x_cpu = x.cpu()
