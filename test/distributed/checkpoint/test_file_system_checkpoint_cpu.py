@@ -293,7 +293,6 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
     def load_tensor(self, tensor: ShardedTensor) -> torch.Tensor:
         backend = dist.get_backend()
         rank = dist.get_rank()
-
         if backend == "xccl":
             out = torch.zeros(tensor.shape, device="xpu:0") if rank == 0 else None
             tensor.gather(out=out)
@@ -442,6 +441,7 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
         )
         rank = dist.get_rank()
         device_type = torch.accelerator.current_accelerator().type
+        
         device = f"xpu:{dist.get_rank()}"
         model_to_save = MyShardedModel3(src_spec).to(device)
         model_to_save._register_state_dict_hook(state_dict_hook)
