@@ -1,9 +1,10 @@
+import operator_benchmark as op_bench
+
 import torch
 import torch.ao.nn.quantized as nnq
 import torch.ao.quantization as tq
 import torch.nn as nn
 
-import operator_benchmark as op_bench
 
 """Microbenchmarks for general quantization operations."""
 
@@ -192,8 +193,8 @@ def fakeQuantizePerTensorOriginalKernel(
 
 fake_quantize_per_tensor_ops = op_bench.op_list(
     attrs=(
-        ("learnable_kernel", fakeQuantizePerTensorLearnableKernel),
-        ("original_kernel", fakeQuantizePerTensorOriginalKernel),
+        ("learnable_kernel_tensor", fakeQuantizePerTensorLearnableKernel),
+        ("original_kernel_tensor", fakeQuantizePerTensorOriginalKernel),
     ),
     attr_names=("op_name", "op_func"),
 )
@@ -296,8 +297,8 @@ def fakeQuantizePerChannelOriginalKernel(
 
 fake_quantize_per_channel_ops = op_bench.op_list(
     attrs=(
-        ("learnable_kernel", fakeQuantizePerChannelLearnableKernel),
-        ("original_kernel", fakeQuantizePerChannelOriginalKernel),
+        ("learnable_kernel_channel", fakeQuantizePerChannelLearnableKernel),
+        ("original_kernel_channel", fakeQuantizePerChannelOriginalKernel),
     ),
     attr_names=("op_name", "op_func"),
 )

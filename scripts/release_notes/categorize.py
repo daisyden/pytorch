@@ -4,7 +4,6 @@ import textwrap
 from pathlib import Path
 
 import common
-import torch
 
 # Imports for working with classi
 from classifier import (
@@ -17,6 +16,8 @@ from classifier import (
 )
 from commitlist import CommitList
 from common import get_commit_data_cache, topics
+
+import torch
 
 
 class Categorizer:
@@ -144,7 +145,7 @@ Labels: {features.labels}
 
 Current category: {commit.category}
 
-Select from: {', '.join(common.categories)}
+Select from: {", ".join(common.categories)}
 
         """
         )
@@ -164,7 +165,7 @@ Select from: {', '.join(common.categories)}
             cat_choice = choices[0]
         print(f"\nSelected: {cat_choice}")
         print(f"\nCurrent topic: {commit.topic}")
-        print(f"""Select from: {', '.join(topics)}""")
+        print(f"""Select from: {", ".join(topics)}""")
         topic_choice = None
         while topic_choice is None:
             value = input("topic> ").strip()

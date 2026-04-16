@@ -1,10 +1,7 @@
 # Owner(s): ["module: dynamo"]
 import torch
-
 import torch._dynamo.test_case
 import torch._dynamo.testing
-import torch.onnx.operators
-from torch._dynamo.testing import same
 
 
 def fn(a, b):
@@ -17,7 +14,7 @@ class InteropTests(torch._dynamo.test_case.TestCase):
         ref = fn(*inputs)
         opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
         res = opt_fn(*inputs)
-        self.assertTrue(same(ref, res))
+        self.assertEqual(ref, res)
 
     def test_fx_fn(self):
         fx_fn = torch.fx.symbolic_trace(fn)
@@ -30,6 +27,19 @@ class InteropTests(torch._dynamo.test_case.TestCase):
     def test_trace_fn(self):
         trace_fn = torch.jit.trace(fn, [torch.zeros(10), torch.zeros(10)])
         self._common(lambda a, b: trace_fn(a, b) + 1)
+
+    def test_staticmethod_script_fn(self):
+        class Foo:
+            @staticmethod
+            @torch.jit.script
+            def _g(a):
+                return a**2
+
+            def g(self, a, b):
+                return self._g(a) + b
+
+        foo = Foo()
+        self._common(lambda a, b: foo.g(a, b) + 1)
 
     def test_vmap_in_graph(self):
         from functools import wraps

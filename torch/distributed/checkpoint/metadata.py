@@ -1,9 +1,13 @@
+# mypy: allow-untyped-defs
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch.distributed.checkpoint.stateful import StatefulT
+
 
 __all__ = [
     "ChunkStorageMetadata",
@@ -12,6 +16,7 @@ __all__ = [
     "Metadata",
     "MetadataIndex",
     "TensorProperties",
+    "StorageMeta",
 ]
 
 
@@ -109,7 +114,7 @@ class TensorProperties:
 class TensorStorageMetadata:
     properties: TensorProperties
     size: torch.Size
-    chunks: List[ChunkStorageMetadata]
+    chunks: list[ChunkStorageMetadata]
 
 
 @dataclass
@@ -118,7 +123,15 @@ class BytesStorageMetadata:
 
 
 STORAGE_TYPES = Union[TensorStorageMetadata, BytesStorageMetadata]
-STATE_DICT_TYPE = Dict[str, Union[StatefulT, Any]]
+STATE_DICT_TYPE = dict[str, Union[StatefulT, Any]]
+
+
+@dataclass
+class StorageMeta:
+    checkpoint_id: Union[str, os.PathLike, None] = None
+    save_id: Optional[str] = None
+    load_id: Optional[str] = None
+    modules: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -126,13 +139,14 @@ class Metadata:
     """This class represents the metadata of the checkpoint."""
 
     # Keys are the same from the `state_dict` used.
-    state_dict_metadata: Dict[str, STORAGE_TYPES]
+    state_dict_metadata: dict[str, STORAGE_TYPES]
     # It is the responsibility of the planner and storage plugins to ensure
     # backward compatibility of the planner_data and storage_data. DCP will
     # also ensure the backward compatibility of the metadata in this file and
     # the metadata of the built-in planner and storage plugins.
     planner_data: Any = None
     storage_data: Any = None
+    storage_meta: Optional[StorageMeta] = None
 
 
 @dataclass(frozen=True)

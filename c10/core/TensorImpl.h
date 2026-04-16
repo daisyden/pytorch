@@ -24,12 +24,12 @@
 #include <c10/util/DimVector.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Flags.h>
-#include <c10/util/Optional.h>
 #include <c10/util/accumulate.h>
 #include <c10/util/intrusive_ptr.h>
 #include <c10/util/irange.h>
 #include <c10/util/safe_numerics.h>
 #include <c10/util/typeid.h>
+#include <optional>
 
 #include <algorithm>
 #include <atomic>
@@ -133,6 +133,7 @@ struct C10_API PlacementDeleteContext {
   DataPtr data_ptr_;
   PlacementDtor placement_dtor_;
   size_t size_;
+
   PlacementDeleteContext(
       DataPtr&& data_ptr,
       PlacementDtor placement_dtor,
@@ -140,6 +141,11 @@ struct C10_API PlacementDeleteContext {
       : data_ptr_(std::move(data_ptr)),
         placement_dtor_(placement_dtor),
         size_(size) {}
+
+  PlacementDeleteContext(PlacementDeleteContext&&) noexcept = delete;
+  PlacementDeleteContext(const PlacementDeleteContext&) = delete;
+  PlacementDeleteContext& operator=(const PlacementDeleteContext&) = delete;
+  PlacementDeleteContext& operator=(PlacementDeleteContext&&) = delete;
   static DataPtr makeDataPtr(
       DataPtr&& data_ptr,
       PlacementDtor placement_dtor,
@@ -187,11 +193,11 @@ struct C10_API AutogradMetaFactory {
 C10_API void SetAutogradMetaFactory(AutogradMetaFactory* factory);
 C10_API AutogradMetaFactory* GetAutogradMetaFactory();
 
-struct C10_API AutogradMetaFactoryRegisterer {
-  explicit AutogradMetaFactoryRegisterer(AutogradMetaFactory* factory) {
-    SetAutogradMetaFactory(factory);
-  }
-};
+struct C10_API AutogradMetaFactoryRegisterer{
+    explicit AutogradMetaFactoryRegisterer(AutogradMetaFactory * factory){
+        SetAutogradMetaFactory(factory);
+} // namespace impl
+}; // namespace c10
 
 } // namespace impl
 
@@ -200,11 +206,11 @@ struct C10_API NamedTensorMetaInterface {
   virtual std::unique_ptr<NamedTensorMetaInterface> clone() const {
     TORCH_INTERNAL_ASSERT(
         false, "Not implemented: NamedTensorMetaInterface::clone");
-  };
+  }
   virtual int64_t slow_dim() const {
     TORCH_INTERNAL_ASSERT(
         false, "Not implemented: NamedTensorMetaInterface::slow_dim");
-  };
+  }
 };
 
 // For ease of copy pasting
@@ -233,10 +239,11 @@ struct C10_API ExtraMeta {
   std::unique_ptr<c10::SymbolicShapeMeta> symbolic_shape_meta_ = nullptr;
   std::unique_ptr<c10::NamedTensorMetaInterface> named_tensor_meta_ = nullptr;
   intrusive_ptr<c10::BackendMeta> backend_meta_ = nullptr;
-  c10::optional<std::string> custom_data_ptr_error_msg_ = c10::nullopt;
-  c10::optional<std::string> custom_storage_error_msg_ = c10::nullopt;
+  std::optional<std::string> custom_data_ptr_error_msg_ = std::nullopt;
+  std::optional<std::string> custom_storage_error_msg_ = std::nullopt;
 
   ExtraMeta() = default;
+  ~ExtraMeta() = default;
   ExtraMeta(const ExtraMeta& other) {
     if (other.symbolic_shape_meta_) {
       symbolic_shape_meta_ =
@@ -255,13 +262,16 @@ struct C10_API ExtraMeta {
       custom_storage_error_msg_ = other.custom_storage_error_msg_;
     }
   }
+  ExtraMeta& operator=(const ExtraMeta& other) = delete;
+  ExtraMeta(ExtraMeta&& other) = delete;
+  ExtraMeta& operator=(ExtraMeta&& other) = delete;
 
   ExtraMeta(
       std::unique_ptr<c10::SymbolicShapeMeta> symbolic_shape_meta,
       std::unique_ptr<c10::NamedTensorMetaInterface> named_tensor_meta,
       intrusive_ptr<c10::BackendMeta> backend_meta,
-      c10::optional<std::string> custom_data_ptr_error_msg = c10::nullopt,
-      c10::optional<std::string> custom_storage_access_error_msg = c10::nullopt)
+      std::optional<std::string> custom_data_ptr_error_msg = std::nullopt,
+      std::optional<std::string> custom_storage_access_error_msg = std::nullopt)
       : symbolic_shape_meta_(std::move(symbolic_shape_meta)),
         named_tensor_meta_(std::move(named_tensor_meta)),
         backend_meta_(std::move(backend_meta)),
@@ -528,7 +538,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   TensorImpl(
       DispatchKeySet,
       const caffe2::TypeMeta data_type,
-      c10::optional<c10::Device> device_opt);
+      std::optional<c10::Device> device_opt);
 
   // Legacy constructors so I don't have to go update call sites.
   // TODO: When Variable is added, delete these constructors
@@ -543,7 +553,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   TensorImpl(
       DispatchKey dispatch_key,
       const caffe2::TypeMeta data_type,
-      c10::optional<c10::Device> device_opt)
+      std::optional<c10::Device> device_opt)
       : TensorImpl(DispatchKeySet(dispatch_key), data_type, device_opt) {}
 
  private:
@@ -555,7 +565,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
       Storage&& storage,
       DispatchKeySet,
       const caffe2::TypeMeta data_type,
-      c10::optional<c10::Device>);
+      std::optional<c10::Device>);
 
  public:
   TensorImpl(const TensorImpl&) = delete;
@@ -1253,7 +1263,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
  protected:
   c10::Device device_default() const {
     TORCH_CHECK(device_opt_.has_value(), "tensor does not have a device");
-    // See NOTE [c10::optional operator usage in CUDA]
+    // See NOTE [std::optional operator usage in CUDA]
     return *device_opt_;
   }
 
@@ -1580,7 +1590,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
         "If you're using torch.compile/export/fx, it is likely that we are erroneously "
         "tracing into a custom kernel. To fix this, please wrap the custom kernel into "
         "an opaque custom op. Please see the following for details: "
-        "https://docs.google.com/document/d/1W--T6wz8IY8fOI0Vm8BF44PdBgs283QvpelJZWieQWQ\n"
+        "https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html\n"
         "If you're using Caffe2, Caffe2 uses a lazy allocation, so you will need to call "
         "mutable_data() or raw_mutable_data() to actually allocate memory.");
     // Caller does the type check.
@@ -1687,7 +1697,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   }
 
   void release_storage_and_set_meta_custom_data_ptr_error_msg_(
-      c10::optional<std::string> s) {
+      std::optional<std::string> s) {
     storage_ = {};
     set_storage_access_should_throw();
     get_extra_meta().custom_data_ptr_error_msg_ = s;
@@ -1737,7 +1747,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   void set_sizes_and_strides(
       c10::SymIntArrayRef sizes,
       c10::SymIntArrayRef strides,
-      c10::optional<c10::SymInt> storage_offset = c10::nullopt);
+      std::optional<c10::SymInt> storage_offset = std::nullopt);
   // This is renamed to avoid breaking overload BC
   void generic_set_sizes_contiguous(c10::SymIntArrayRef sizes);
   void generic_set_sizes_contiguous(c10::IntArrayRef sizes) {
@@ -1824,6 +1834,10 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
         MemoryFormat::Contiguous); // calls refresh_contiguous()
   }
 
+  C10_ALWAYS_INLINE const impl::SizesAndStrides& sizes_and_strides() {
+    return sizes_and_strides_;
+  }
+
   /**
    * Set the sizes and strides of a tensor.
    *
@@ -1834,7 +1848,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   void set_sizes_and_strides(
       IntArrayRef new_size,
       IntArrayRef new_stride,
-      c10::optional<int64_t> storage_offset = c10::nullopt) {
+      std::optional<int64_t> storage_offset = std::nullopt) {
     TORCH_CHECK(
         allow_tensor_metadata_change(),
         "set_sizes_and_strides ",
@@ -1891,7 +1905,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
    * storage / storage_offset). See NOTE [ Metadata Change for a Detached Tensor
    * ] for details.
    */
-  void set_allow_tensor_metadata_change(bool value) {
+  void set_allow_tensor_metadata_change(bool value [[maybe_unused]]) {
     // TODO: at some point, we should kill this field completely.
     allow_tensor_metadata_change_ = true;
   }
@@ -2031,7 +2045,8 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
            BackendComponent::MPSBit,
            BackendComponent::HIPBit,
            BackendComponent::XPUBit,
-           BackendComponent::HPUBit});
+           BackendComponent::HPUBit,
+           BackendComponent::MTIABit});
       constexpr auto dense_k = DispatchKeySet(DispatchKey::Dense);
       return ts.has_any(dense_k) && ts.has_any(dense_backends);
     };
@@ -2129,10 +2144,10 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   }
 
  private:
-  // See NOTE [c10::optional operator usage in CUDA]
+  // See NOTE [std::optional operator usage in CUDA]
   // We probably don't want to expose this publicly until
   // the note is addressed.
-  c10::optional<c10::Device> device_opt() const {
+  std::optional<c10::Device> device_opt() const {
     return device_opt_;
   }
 
@@ -2146,7 +2161,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
     TORCH_CHECK(
         device_opt_.has_value(),
         "device_type cannot be run on undefined Tensor");
-    // See NOTE [c10::optional operator usage in CUDA]
+    // See NOTE [std::optional operator usage in CUDA]
     return (*device_opt_).type();
   }
 
@@ -2311,7 +2326,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
     // Check it here statically - otherwise TypeMeta would throw the runtime
     // error in attempt to invoke TypeMeta::ctor()
     static_assert(
-        std::is_default_constructible<T>::value,
+        std::is_default_constructible_v<T>,
         "Tensor can't hold non-default-constructable types");
     return static_cast<T*>(raw_mutable_data(caffe2::TypeMeta::Make<T>()));
   }
@@ -2445,18 +2460,6 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
     return has_symbolic_sizes_strides_;
   }
 
-  // if this returns true, then it is guaranteed that this tensor does NOT have
-  // symbolic sizes/strides. This is different from the above, because it's
-  // possible that has_symbolic_sizes_strides() returns false, but we do
-  // not have symbolic sizes/strides. This exists for the case of
-  // Nested Tensor python subclass, where the sizes are implemented in python
-  // (TODO: clean this up and just implement sizes in nested tensor without a
-  // python implementation)
-  bool does_not_have_symbolic_sizes_strides() const {
-    return !has_symbolic_sizes_strides() &&
-        !matches_policy(SizesStridesPolicy::CustomStrides);
-  }
-
  private:
   void HandleResize();
 
@@ -2564,17 +2567,17 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
    * Compute whether or not a tensor is contiguous based on the sizes and
    * strides of a tensor.
    */
-  bool compute_contiguous(identity<bool>) const;
+  bool compute_contiguous() const;
 
-  bool compute_channels_last_contiguous_2d(identity<bool>) const;
+  bool compute_channels_last_contiguous_2d() const;
 
-  bool compute_channels_last_contiguous_3d(identity<bool>) const;
+  bool compute_channels_last_contiguous_3d() const;
 
-  bool compute_strides_like_channels_last_2d(identity<bool>) const;
+  bool compute_strides_like_channels_last_2d() const;
 
-  bool compute_strides_like_channels_last_3d(identity<bool>) const;
+  bool compute_strides_like_channels_last_3d() const;
 
-  bool compute_non_overlapping_and_dense(identity<bool>) const;
+  bool compute_non_overlapping_and_dense() const;
 
  protected:
   /**
@@ -2617,68 +2620,62 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   }
 
  private:
-  // NB: the TypeId argument prevents confusion where you pass a true/false
-  // literal and pick the wrong overload
-
-  void _set_is_contiguous(identity<bool>, bool b) {
+  void _set_is_contiguous(bool b) {
     is_contiguous_ = b;
   }
 
-  void _set_is_channels_last_contiguous(identity<bool>, bool b) {
+  void _set_is_channels_last_contiguous(bool b) {
     is_channels_last_contiguous_ = b;
   }
 
-  void _set_is_channels_last_3d_contiguous(identity<bool>, bool b) {
+  void _set_is_channels_last_3d_contiguous(bool b) {
     is_channels_last_3d_contiguous_ = b;
   }
 
-  void _set_is_channels_last(identity<bool>, bool b) {
+  void _set_is_channels_last(bool b) {
     is_channels_last_ = b;
   }
 
-  void _set_is_channels_last_3d(identity<bool>, bool b) {
+  void _set_is_channels_last_3d(bool b) {
     is_channels_last_3d_ = b;
   }
 
-  void _set_is_non_overlapping_and_dense(identity<bool>, bool b) {
+  void _set_is_non_overlapping_and_dense(bool b) {
     is_non_overlapping_and_dense_ = b;
   }
 
   // These are little wrappers over the real compute_ functions that
   // can make use of other contiguity fields to short circuit.
 
-  bool compute_is_non_overlapping_and_dense_dim4(identity<bool> type_id) {
+  bool compute_is_non_overlapping_and_dense_dim4() {
     return is_contiguous_ || is_channels_last_contiguous_ ||
-        compute_non_overlapping_and_dense(type_id);
+        compute_non_overlapping_and_dense();
   }
 
-  bool compute_channels_last_contiguous_3d_dim5(identity<bool> type_id) {
+  bool compute_channels_last_contiguous_3d_dim5() {
     return !is_channels_last_contiguous_ &&
-        compute_channels_last_contiguous_3d(type_id);
+        compute_channels_last_contiguous_3d();
   }
 
-  bool compute_channels_last_2d_dim5(identity<bool> type_id) {
+  bool compute_channels_last_2d_dim5() {
     return !is_channels_last_3d_contiguous_ &&
-        compute_strides_like_channels_last_2d(type_id);
+        compute_strides_like_channels_last_2d();
   }
 
-  bool compute_channels_last_3d_dim5(identity<bool> type_id) {
-    return !is_channels_last_ && compute_strides_like_channels_last_3d(type_id);
+  bool compute_channels_last_3d_dim5() {
+    return !is_channels_last_ && compute_strides_like_channels_last_3d();
   }
 
-  bool compute_is_non_overlapping_and_dense_dim5(identity<bool> type_id) {
+  bool compute_is_non_overlapping_and_dense_dim5() {
     return is_contiguous_ || is_channels_last_contiguous_ ||
-        is_channels_last_3d_contiguous_ ||
-        compute_non_overlapping_and_dense(type_id);
+        is_channels_last_3d_contiguous_ || compute_non_overlapping_and_dense();
   }
 
-  bool compute_is_non_overlapping_and_dense_anydim(identity<bool> type_id) {
-    return is_contiguous_ || compute_non_overlapping_and_dense(type_id);
+  bool compute_is_non_overlapping_and_dense_anydim() {
+    return is_contiguous_ || compute_non_overlapping_and_dense();
   }
 
-  template <typename T>
   void _refresh_contiguous() {
-    auto type_id = identity<T>();
     // Note:
     // Dim 0, 1, 2 will never be a channels last 2d/3d format
     // Dim 3+ is possibly be a channels last 2d format (Dim 4 only at this
@@ -2686,28 +2683,24 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
     // this point)
     switch (dim()) {
       case 4: {
-        _set_is_contiguous(type_id, compute_contiguous(type_id));
-        _set_is_channels_last_contiguous(
-            type_id, compute_channels_last_contiguous_2d(type_id));
-        _set_is_channels_last_3d_contiguous(type_id, false);
-        _set_is_channels_last(
-            type_id, compute_strides_like_channels_last_2d(type_id));
-        _set_is_channels_last_3d(type_id, false);
+        _set_is_contiguous(compute_contiguous());
+        _set_is_channels_last_contiguous(compute_channels_last_contiguous_2d());
+        _set_is_channels_last_3d_contiguous(false);
+        _set_is_channels_last(compute_strides_like_channels_last_2d());
+        _set_is_channels_last_3d(false);
         _set_is_non_overlapping_and_dense(
-            type_id, compute_is_non_overlapping_and_dense_dim4(type_id));
+            compute_is_non_overlapping_and_dense_dim4());
         break;
       }
       case 5: {
-        _set_is_contiguous(type_id, compute_contiguous(type_id));
-        _set_is_channels_last_contiguous(
-            type_id, compute_channels_last_contiguous_2d(type_id));
+        _set_is_contiguous(compute_contiguous());
+        _set_is_channels_last_contiguous(compute_channels_last_contiguous_2d());
         _set_is_channels_last_3d_contiguous(
-            type_id, compute_channels_last_contiguous_3d_dim5(type_id));
-        _set_is_channels_last(type_id, compute_channels_last_2d_dim5(type_id));
-        _set_is_channels_last_3d(
-            type_id, compute_channels_last_3d_dim5(type_id));
+            compute_channels_last_contiguous_3d_dim5());
+        _set_is_channels_last(compute_channels_last_2d_dim5());
+        _set_is_channels_last_3d(compute_channels_last_3d_dim5());
         _set_is_non_overlapping_and_dense(
-            type_id, compute_is_non_overlapping_and_dense_dim5(type_id));
+            compute_is_non_overlapping_and_dense_dim5());
         break;
       }
       default:
@@ -2716,13 +2709,13 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
         // mean the tensor is strided like channels_last: for strides on channel
         // dimension could suggest desired memory_layout, but it doesn't affect
         // memory storage
-        _set_is_contiguous(type_id, compute_contiguous(type_id));
-        _set_is_channels_last_contiguous(type_id, false);
-        _set_is_channels_last_3d_contiguous(type_id, false);
-        _set_is_channels_last(type_id, false);
-        _set_is_channels_last_3d(type_id, false);
+        _set_is_contiguous(compute_contiguous());
+        _set_is_channels_last_contiguous(false);
+        _set_is_channels_last_3d_contiguous(false);
+        _set_is_channels_last(false);
+        _set_is_channels_last_3d(false);
         _set_is_non_overlapping_and_dense(
-            type_id, compute_is_non_overlapping_and_dense_anydim(type_id));
+            compute_is_non_overlapping_and_dense_anydim());
         break;
     }
   }
@@ -2736,7 +2729,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
     if (has_symbolic_sizes_strides_) {
       symbolic_shape_meta().refresh_contiguous();
     } else {
-      _refresh_contiguous<bool>();
+      _refresh_contiguous();
     }
   }
 
@@ -2887,7 +2880,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   // agree with the type meta in storage
   caffe2::TypeMeta data_type_;
 
-  // NOTE [c10::optional operator usage in CUDA]
+  // NOTE [std::optional operator usage in CUDA]
   // Our optional definition doesn't compile in .cu file if `value()` or
   // `operator->` are used.  Instead, we always use `operator*`.
   // See https://github.com/pytorch/pytorch/issues/18496 for more info.
@@ -2899,7 +2892,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   //
   // INVARIANT: device_opt_ is only nullopt for undefined tensors
   // (which do not have a device.)
-  c10::optional<c10::Device> device_opt_;
+  std::optional<c10::Device> device_opt_;
 
   // default member initializers for bit-fields only available with -std=c++2a
   // or -std=gnu++2a

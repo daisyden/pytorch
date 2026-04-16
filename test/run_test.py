@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import copy
 import glob
 import json
 import os
-import pathlib
+import platform
 import re
 import shutil
 import signal
@@ -14,9 +15,11 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from contextlib import ExitStack
 from datetime import datetime
-from typing import Any, cast, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from pathlib import Path
+from typing import Any, cast, NamedTuple, Optional, Union
 
 import pkg_resources
 
@@ -24,26 +27,25 @@ import torch
 import torch.distributed as dist
 from torch.multiprocessing import current_process, get_context
 from torch.testing._internal.common_utils import (
-    FILE_SCHEMA,
     get_report_path,
     IS_CI,
     IS_MACOS,
-    IS_WINDOWS,
-    parser as common_parser,
     retry_shell,
     set_cwd,
     shell,
     TEST_CUDA,
+    TEST_SAVE_XML,
     TEST_WITH_ASAN,
     TEST_WITH_CROSSREF,
     TEST_WITH_ROCM,
     TEST_WITH_SLOW_GRADCHECK,
 )
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # using tools/ to optimize test run.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
 from tools.stats.import_test_stats import (
     ADDITIONAL_CI_FILES_FOLDER,
     TEST_CLASS_TIMES_FILE,
@@ -59,8 +61,10 @@ from tools.testing.discover_tests import (
 )
 from tools.testing.do_target_determination_for_s3 import import_results
 from tools.testing.target_determination.gen_artifact import gen_ci_artifact
+from tools.testing.target_determination.heuristics.previously_failed_in_pr import (
+    gen_additional_test_failures_file,
+)
 from tools.testing.target_determination.heuristics.utils import get_pr_number
-
 from tools.testing.test_run import TestRun
 from tools.testing.test_selections import (
     calculate_shards,
@@ -69,15 +73,21 @@ from tools.testing.test_selections import (
     ShardedTest,
     THRESHOLD,
 )
+from tools.testing.upload_artifacts import zip_and_upload_artifacts
 
-HAVE_TEST_SELECTION_TOOLS = True
+
 # Make sure to remove REPO_ROOT after import is done
 sys.path.remove(str(REPO_ROOT))
 
 
+HAVE_TEST_SELECTION_TOOLS = True
+TEST_CONFIG = os.getenv("TEST_CONFIG", "")
+BUILD_ENVIRONMENT = os.getenv("BUILD_ENVIRONMENT", "")
 RERUN_DISABLED_TESTS = os.getenv("PYTORCH_TEST_RERUN_DISABLED_TESTS", "0") == "1"
 DISTRIBUTED_TEST_PREFIX = "distributed"
 INDUCTOR_TEST_PREFIX = "inductor"
+IS_SLOW = "slow" in TEST_CONFIG or "slow" in BUILD_ENVIRONMENT
+IS_S390X = platform.machine() == "s390x"
 
 
 # Note [ROCm parallel CI testing]
@@ -101,9 +111,7 @@ def maybe_set_hip_visible_devies():
 
 
 def strtobool(s):
-    if s.lower() in ["", "0", "false", "off"]:
-        return False
-    return True
+    return s.lower() not in {"", "0", "false", "off"}
 
 
 class TestChoices(list):
@@ -164,25 +172,86 @@ ROCM_BLOCKLIST = [
     "distributed/rpc/test_tensorpipe_agent",
     "distributed/rpc/test_share_memory",
     "distributed/rpc/cuda/test_tensorpipe_agent",
-    "distributed/_shard/checkpoint/test_checkpoint"
-    "distributed/_shard/checkpoint/test_file_system_checkpoint"
-    "distributed/_shard/sharding_spec/test_sharding_spec",
-    "distributed/_shard/sharding_plan/test_sharding_plan",
-    "distributed/_shard/sharded_tensor/test_sharded_tensor",
-    "distributed/_shard/sharded_tensor/test_sharded_tensor_reshard",
-    "distributed/_shard/sharded_tensor/ops/test_embedding",
-    "distributed/_shard/sharded_tensor/ops/test_embedding_bag",
-    "distributed/_shard/sharded_tensor/ops/test_binary_cmp",
-    "distributed/_shard/sharded_tensor/ops/test_init",
-    "distributed/_shard/sharded_optim/test_sharded_optim",
     "test_determination",
     "test_jit_legacy",
     "test_cuda_nvml_based_avail",
     "test_jit_cuda_fuser",
 ]
 
+S390X_BLOCKLIST = [
+    # these tests fail due to various reasons
+    "dynamo/test_misc",
+    "inductor/test_cpu_repro",
+    "inductor/test_cpu_select_algorithm",
+    "inductor/test_aot_inductor_arrayref",
+    "inductor/test_torchinductor_codegen_dynamic_shapes",
+    "lazy/test_meta_kernel",
+    "onnx/test_utility_funs",
+    "profiler/test_profiler",
+    "test_ao_sparsity",
+    "test_cpp_extensions_open_device_registration",
+    "test_jit",
+    "test_metal",
+    "test_mps",
+    "dynamo/test_torchrec",
+    "inductor/test_aot_inductor_utils",
+    "inductor/test_coordinate_descent_tuner",
+    "test_jiterator",
+    "inductor/test_cpu_cpp_wrapper",
+    "export/test_converter",
+    "inductor/test_inductor_freezing",
+    "dynamo/test_utils",
+    "test_nn",
+    "functorch/test_ops",
+    # these tests run long and fail in addition to that
+    "dynamo/test_dynamic_shapes",
+    "test_quantization",
+    "inductor/test_torchinductor",
+    "inductor/test_torchinductor_dynamic_shapes",
+    "inductor/test_torchinductor_opinfo",
+    "test_binary_ufuncs",
+    "test_unary_ufuncs",
+    # these tests fail when cuda is not available
+    "inductor/test_aot_inductor",
+    "inductor/test_best_config",
+    "inductor/test_cudacodecache",
+    "inductor/test_inductor_utils",
+    "inductor/test_inplacing_pass",
+    "inductor/test_kernel_benchmark",
+    "inductor/test_max_autotune",
+    "inductor/test_move_constructors_to_cuda",
+    "inductor/test_multi_kernel",
+    "inductor/test_pattern_matcher",
+    "inductor/test_perf",
+    "inductor/test_select_algorithm",
+    "inductor/test_snode_runtime",
+    "inductor/test_triton_wrapper",
+    # these tests fail when mkldnn is not available
+    "inductor/test_custom_post_grad_passes",
+    "inductor/test_mkldnn_pattern_matcher",
+    # lacks quantization support
+    "onnx/test_models_quantized_onnxruntime",
+    "onnx/test_pytorch_onnx_onnxruntime",
+    # https://github.com/pytorch/pytorch/issues/102078
+    "test_decomp",
+    # https://github.com/pytorch/pytorch/issues/146698
+    "test_model_exports_to_core_aten",
+    # runs very long, skip for now
+    "inductor/test_layout_optim",
+    "test_fx",
+    # some false errors
+    "doctests",
+]
+
 XPU_BLOCKLIST = [
     "test_autograd",
+    "profiler/test_cpp_thread",
+    "profiler/test_execution_trace",
+    "profiler/test_memory_profiler",
+    "profiler/test_profiler",
+    "profiler/test_profiler_tree",
+    "profiler/test_record_function",
+    "profiler/test_torch_tidy",
 ]
 
 XPU_TEST = [
@@ -191,6 +260,7 @@ XPU_TEST = [
 
 # The tests inside these files should never be run in parallel with each other
 RUN_PARALLEL_BLOCKLIST = [
+    "test_extension_utils",
     "test_cpp_extensions_jit",
     "test_cpp_extensions_open_device_registration",
     "test_cpp_extensions_stream_and_event",
@@ -200,6 +270,7 @@ RUN_PARALLEL_BLOCKLIST = [
     "test_multiprocessing",
     "test_multiprocessing_spawn",
     "test_namedtuple_return_api",
+    "test_openreg",
     "test_overrides",
     "test_show_pickle",
     "test_tensorexpr",
@@ -209,6 +280,7 @@ RUN_PARALLEL_BLOCKLIST = [
     "test_cuda_nvml_based_avail",
     # temporarily sets a global config
     "test_autograd_fallback",
+    "inductor/test_compiler_bisector",
 ] + FSDP_TEST
 
 # Test files that should always be run serially with other test files,
@@ -228,9 +300,7 @@ CI_SERIAL_LIST = [
     "nn/test_pooling",
     "nn/test_convolution",  # Doesn't respect set_per_process_memory_fraction, results in OOM for other tests in slow gradcheck
     "distributions/test_distributions",
-    "functorch/test_vmap",  # OOM
     "test_fx",  # gets SIGKILL
-    "test_dataloader",  # frequently hangs for ROCm
     "functorch/test_memory_efficient_fusion",  # Cause CUDA OOM on ROCm
     "test_utils",  # OOM
     "test_sort_and_select",  # OOM
@@ -239,7 +309,8 @@ CI_SERIAL_LIST = [
     "test_native_mha",  # OOM
     "test_module_hooks",  # OOM
     "inductor/test_max_autotune",
-    "inductor/test_cutlass_backend",  # slow due to many nvcc compilation steps
+    "inductor/test_cutlass_backend",  # slow due to many nvcc compilation steps,
+    "inductor/test_flex_attention",  # OOM
 ]
 # A subset of onnx tests that cannot run in parallel due to high memory usage.
 ONNX_SERIAL_LIST = [
@@ -271,31 +342,32 @@ DISTRIBUTED_TESTS_CONFIG = {}
 
 
 if dist.is_available():
+    num_gpus = torch.cuda.device_count()
     DISTRIBUTED_TESTS_CONFIG["test"] = {"WORLD_SIZE": "1"}
     if not TEST_WITH_ROCM and dist.is_mpi_available():
         DISTRIBUTED_TESTS_CONFIG["mpi"] = {
             "WORLD_SIZE": "3",
-            "TEST_REPORT_SOURCE_OVERRIDE": "dist-mpi",
         }
-    if dist.is_nccl_available():
+    if dist.is_nccl_available() and num_gpus > 0:
         DISTRIBUTED_TESTS_CONFIG["nccl"] = {
-            "WORLD_SIZE": "2" if torch.cuda.device_count() == 2 else "3",
-            "TEST_REPORT_SOURCE_OVERRIDE": "dist-nccl",
+            "WORLD_SIZE": f"{num_gpus}",
         }
     if dist.is_gloo_available():
         DISTRIBUTED_TESTS_CONFIG["gloo"] = {
-            "WORLD_SIZE": "2" if torch.cuda.device_count() == 2 else "3",
-            "TEST_REPORT_SOURCE_OVERRIDE": "dist-gloo",
+            # TODO: retire testing gloo with CUDA
+            "WORLD_SIZE": f"{num_gpus if num_gpus > 0 else 3}",
         }
-    if dist.is_ucc_available():
-        DISTRIBUTED_TESTS_CONFIG["ucc"] = {
-            "WORLD_SIZE": "2" if torch.cuda.device_count() == 2 else "3",
-            "TEST_REPORT_SOURCE_OVERRIDE": "dist-ucc",
-            "UCX_TLS": "tcp,cuda",
-            "UCC_TLS": "nccl,ucp,cuda",
-            "UCC_TL_UCP_TUNE": "cuda:0",  # don't use UCP TL on CUDA as it is not well supported
-            "UCC_EC_CUDA_USE_COOPERATIVE_LAUNCH": "n",  # CI nodes (M60) fail if it is on
-        }
+    del num_gpus
+    # Test with UCC backend is deprecated.
+    # See https://github.com/pytorch/pytorch/pull/137161
+    # if dist.is_ucc_available():
+    #     DISTRIBUTED_TESTS_CONFIG["ucc"] = {
+    #         "WORLD_SIZE": f"{torch.cuda.device_count()}",
+    #         "UCX_TLS": "tcp,cuda",
+    #         "UCC_TLS": "nccl,ucp,cuda",
+    #         "UCC_TL_UCP_TUNE": "cuda:0",  # don't use UCP TL on CUDA as it is not well supported
+    #         "UCC_EC_CUDA_USE_COOPERATIVE_LAUNCH": "n",  # CI nodes (M60) fail if it is on
+    #     }
 
 # https://stackoverflow.com/questions/2549939/get-signal-names-from-numbers-in-python
 SIGNALS_TO_NAMES_DICT = {
@@ -320,9 +392,20 @@ JIT_EXECUTOR_TESTS = [
 INDUCTOR_TESTS = [test for test in TESTS if test.startswith(INDUCTOR_TEST_PREFIX)]
 DISTRIBUTED_TESTS = [test for test in TESTS if test.startswith(DISTRIBUTED_TEST_PREFIX)]
 TORCH_EXPORT_TESTS = [test for test in TESTS if test.startswith("export")]
+AOT_DISPATCH_TESTS = [
+    test for test in TESTS if test.startswith("functorch/test_aotdispatch")
+]
 FUNCTORCH_TESTS = [test for test in TESTS if test.startswith("functorch")]
 ONNX_TESTS = [test for test in TESTS if test.startswith("onnx")]
-CPP_TESTS = [test for test in TESTS if test.startswith(CPP_TEST_PREFIX)]
+
+
+def _is_cpp_test(test):
+    # Note: tests underneath cpp_extensions are different from other cpp tests
+    # in that they utilize the usual python test infrastructure.
+    return test.startswith(CPP_TEST_PREFIX) and not test.startswith("cpp_extensions")
+
+
+CPP_TESTS = [test for test in TESTS if _is_cpp_test(test)]
 
 TESTS_REQUIRING_LAPACK = [
     "distributions/test_constraints",
@@ -340,9 +423,14 @@ TESTS_NOT_USING_GRADCHECK = [
     "test_decomp",
     "test_cpp_extensions_jit",
     "test_jit",
+    "test_matmul_cuda",
     "test_ops",
     "test_ops_jit",
     "dynamo/test_recompile_ux",
+    "inductor/test_compiled_optimizers",
+    "inductor/test_cutlass_backend",
+    "inductor/test_max_autotune",
+    "inductor/test_select_algorithm",
     "inductor/test_smoke",
     "test_quantization",
 ]
@@ -377,14 +465,20 @@ def run_test(
     env=None,
     print_log=True,
 ) -> int:
+    scribe_token = os.getenv("SCRIBE_GRAPHQL_ACCESS_TOKEN", "")
+    if scribe_token:
+        print_to_stderr("SCRIBE_GRAPHQL_ACCESS_TOKEN is set")
+    else:
+        print_to_stderr("SCRIBE_GRAPHQL_ACCESS_TOKEN is NOT set")
+
     env = env or os.environ.copy()
     maybe_set_hip_visible_devies()
-    unittest_args = options.additional_unittest_args.copy()
+    unittest_args = options.additional_args.copy()
     test_file = test_module.name
     stepcurrent_key = test_file
 
     is_distributed_test = test_file.startswith(DISTRIBUTED_TEST_PREFIX)
-    is_cpp_test = test_file.startswith(CPP_TEST_PREFIX)
+    is_cpp_test = _is_cpp_test(test_file)
     # NB: Rerun disabled tests depends on pytest-flakefinder and it doesn't work with
     # pytest-cpp atm. We also don't have support to disable C++ test yet, so it's ok
     # to just return successfully here
@@ -406,7 +500,7 @@ def run_test(
         stepcurrent_key = f"{test_file}_{test_module.shard}_{os.urandom(8).hex()}"
 
     if options.verbose:
-        unittest_args.append(f'-{"v"*options.verbose}')  # in case of pytest
+        unittest_args.append(f"-{'v' * options.verbose}")  # in case of pytest
 
     if test_file in RUN_PARALLEL_BLOCKLIST:
         unittest_args = [
@@ -427,7 +521,14 @@ def run_test(
             )
         )
         unittest_args.extend(test_module.get_pytest_args())
-        unittest_args = [arg if arg != "-f" else "-x" for arg in unittest_args]
+        replacement = {"-f": "-x", "-dist=loadfile": "--dist=loadfile"}
+        unittest_args = [replacement.get(arg, arg) for arg in unittest_args]
+
+    if options.showlocals:
+        if options.pytest:
+            unittest_args.extend(["--showlocals", "--tb=long", "--color=yes"])
+        else:
+            unittest_args.append("--locals")
 
     # NB: These features are not available for C++ tests, but there is little incentive
     # to implement it because we have never seen a flaky C++ test before.
@@ -453,7 +554,7 @@ def run_test(
         # case such as coverage for C++ test. So just returning ok makes sense
         return 0
 
-    if test_file.startswith(CPP_TEST_PREFIX):
+    if is_cpp_test:
         # C++ tests are not the regular test directory
         if CPP_TESTS_DIR:
             cpp_test = os.path.join(
@@ -462,7 +563,7 @@ def run_test(
             )
         else:
             cpp_test = os.path.join(
-                pathlib.Path(test_directory).parent,
+                Path(test_directory).parent,
                 CPP_TEST_PATH,
                 test_file.replace(f"{CPP_TEST_PREFIX}/", ""),
             )
@@ -491,18 +592,17 @@ def run_test(
         and not is_cpp_test
         and "-n" not in command
     )
-    is_slow = "slow" in os.environ.get("TEST_CONFIG", "") or "slow" in os.environ.get(
-        "BUILD_ENVRIONMENT", ""
-    )
     timeout = (
         None
         if not options.enable_timeout
         else THRESHOLD * 6
-        if is_slow
+        if IS_SLOW
         else THRESHOLD * 3
         if should_retry
         and isinstance(test_module, ShardedTest)
         and test_module.time is not None
+        else THRESHOLD * 3
+        if is_cpp_test
         else None
     )
     print_to_stderr(f"Executing {command} ... [{datetime.now()}]")
@@ -531,6 +631,7 @@ def run_test(
                 stderr=output,
                 env=env,
                 timeout=timeout,
+                retries=0,
             )
 
             # Pytest return code 5 means no test is collected. Exit code 4 is
@@ -548,6 +649,48 @@ def run_test(
     return ret_code
 
 
+def install_cpp_extensions(cpp_extensions_test_dir, env=os.environ):
+    # Wipe the build folder, if it exists already
+    cpp_extensions_test_build_dir = os.path.join(cpp_extensions_test_dir, "build")
+    if os.path.exists(cpp_extensions_test_build_dir):
+        shutil.rmtree(cpp_extensions_test_build_dir)
+
+    # Build the test cpp extensions modules
+    cmd = [sys.executable, "setup.py", "install", "--root", "./install"]
+    return_code = shell(cmd, cwd=cpp_extensions_test_dir, env=env)
+    if return_code != 0:
+        return None, return_code
+
+    install_directory = ""
+    # install directory is the one that is named site-packages
+    for root, directories, _ in os.walk(
+        os.path.join(cpp_extensions_test_dir, "install")
+    ):
+        for directory in directories:
+            if "-packages" in directory:
+                install_directory = os.path.join(root, directory)
+
+    assert install_directory, "install_directory must not be empty"
+    return install_directory, 0
+
+
+@contextlib.contextmanager
+def extend_python_path(install_directories):
+    python_path = os.environ.get("PYTHONPATH", "")
+    try:
+        os.environ["PYTHONPATH"] = os.pathsep.join(install_directories + [python_path])
+        yield
+    finally:
+        os.environ["PYTHONPATH"] = python_path
+
+
+def try_set_cpp_stack_traces(env, command, set=True):
+    # Print full c++ stack traces during retries
+    env = env or {}
+    env["TORCH_SHOW_CPP_STACKTRACES"] = "1" if set else "0"
+    return env
+
+
 def run_test_retries(
     command,
     test_directory,
@@ -557,9 +700,9 @@ def run_test_retries(
     output,
     continue_through_error,
 ):
-    # Run the test with -x to stop at first failure. Try again, skipping the
-    # previously run tests, repeating this until there is a test that fails 3
-    # times (same number of rVetries we typically give).
+    # Run the test with -x to stop at first failure.  Rerun the test by itself.
+    # If it succeeds, move on to the rest of the tests in a new process.  If it
+    # still fails, see below
     #
     # If continue through error is not set, then we fail fast.
     #
@@ -587,12 +730,12 @@ def run_test_retries(
             retries=0,  # no retries here, we do it ourselves, this is because it handles timeout exceptions well
         )
         ret_code = 0 if ret_code == 5 else ret_code
-        if ret_code == 0:
+        if ret_code == 0 and not sc_command.startswith("--rs="):
             break  # Got to the end of the test suite successfully
         signal_name = f" ({SIGNALS_TO_NAMES_DICT[-ret_code]})" if ret_code < 0 else ""
         print_to_file(f"Got exit code {ret_code}{signal_name}")
 
-        # Read what just failed
+        # Read what just failed/ran
         try:
             with open(
                 REPO_ROOT / ".pytest_cache/v/cache/stepcurrent" / stepcurrent_key
@@ -605,25 +748,30 @@ def run_test_retries(
             )
             break
 
-        num_failures[current_failure] += 1
-        if num_failures[current_failure] >= 3:
+        env = try_set_cpp_stack_traces(env, command, set=False)
+        if ret_code != 0:
+            num_failures[current_failure] += 1
+
+        if ret_code == 0:
+            # Rerunning the previously failing test succeeded, so now we can
+            # skip it and move on
+            sc_command = f"--scs={stepcurrent_key}"
+            print_to_file(
+                "Test succeeeded in new process, continuing with the rest of the tests"
+            )
+        elif num_failures[current_failure] >= 3:
             if not continue_through_error:
                 print_to_file("Stopping at first consistent failure")
                 break
             sc_command = f"--scs={stepcurrent_key}"
+            print_to_file(
+                "Test failed consistently, "
+                "continuing with the rest of the tests due to continue-through-error being set"
+            )
         else:
-            sc_command = f"--sc={stepcurrent_key}"
-        print_to_file("Retrying...")
-        # Print full c++ stack traces during retries
-        # Don't do it for macos inductor tests as it makes them
-        # segfault for some reason
-        if not (
-            IS_MACOS
-            and len(command) >= 2
-            and command[2].startswith(INDUCTOR_TEST_PREFIX)
-        ):
-            env = env or {}
-            env["TORCH_SHOW_CPP_STACKTRACES"] = "1"
+            env = try_set_cpp_stack_traces(env, command, set=True)
+            sc_command = f"--rs={stepcurrent_key}"
+            print_to_file("Retrying single test...")
         print_items = []  # do not continue printing them, massive waste of space
 
     consistent_failures = [x[1:-1] for x in num_failures.keys() if num_failures[x] >= 3]
@@ -664,21 +812,27 @@ def _test_cpp_extensions_aot(test_directory, options, use_ninja):
     # Build the test cpp extensions modules
     shell_env = os.environ.copy()
     shell_env["USE_NINJA"] = str(1 if use_ninja else 0)
-    cmd = [sys.executable, "setup.py", "install", "--root", "./install"]
-    return_code = shell(cmd, cwd=cpp_extensions_test_dir, env=shell_env)
+    install_cmd = [sys.executable, "setup.py", "install", "--root", "./install"]
+    wheel_cmd = [sys.executable, "setup.py", "bdist_wheel"]
+    return_code = shell(install_cmd, cwd=cpp_extensions_test_dir, env=shell_env)
     if return_code != 0:
         return return_code
     if sys.platform != "win32":
-        return_code = shell(
-            cmd,
-            cwd=os.path.join(cpp_extensions_test_dir, "no_python_abi_suffix_test"),
-            env=shell_env,
-        )
-        if return_code != 0:
-            return return_code
+        exts_to_build = [
+            (install_cmd, "no_python_abi_suffix_test"),
+        ]
+        if TEST_CUDA:
+            exts_to_build.append((wheel_cmd, "python_agnostic_extension"))
+            exts_to_build.append((install_cmd, "libtorch_agnostic_extension"))
+        for cmd, extension_dir in exts_to_build:
+            return_code = shell(
+                cmd,
+                cwd=os.path.join(cpp_extensions_test_dir, extension_dir),
+                env=shell_env,
+            )
+            if return_code != 0:
+                return return_code
 
-    # "install" the test modules and run tests
-    python_path = os.environ.get("PYTHONPATH", "")
     from shutil import copyfile
 
     os.environ["USE_NINJA"] = shell_env["USE_NINJA"]
@@ -687,20 +841,26 @@ def _test_cpp_extensions_aot(test_directory, options, use_ninja):
         test_directory + "/test_cpp_extensions_aot.py",
         test_directory + "/" + test_module + ".py",
     )
+
     try:
         cpp_extensions = os.path.join(test_directory, "cpp_extensions")
-        install_directory = ""
+        install_directories = []
         # install directory is the one that is named site-packages
         for root, directories, _ in os.walk(os.path.join(cpp_extensions, "install")):
             for directory in directories:
                 if "-packages" in directory:
-                    install_directory = os.path.join(root, directory)
+                    install_directories.append(os.path.join(root, directory))
 
-        assert install_directory, "install_directory must not be empty"
-        os.environ["PYTHONPATH"] = os.pathsep.join([install_directory, python_path])
-        return run_test(ShardedTest(test_module, 1, 1), test_directory, options)
+        for root, directories, _ in os.walk(
+            os.path.join(cpp_extensions, "libtorch_agnostic_extension", "install")
+        ):
+            for directory in directories:
+                if "-packages" in directory:
+                    install_directories.append(os.path.join(root, directory))
+
+        with extend_python_path(install_directories):
+            return run_test(ShardedTest(test_module, 1, 1), test_directory, options)
     finally:
-        os.environ["PYTHONPATH"] = python_path
         if os.path.exists(test_directory + "/" + test_module + ".py"):
             os.remove(test_directory + "/" + test_module + ".py")
         os.environ.pop("USE_NINJA")
@@ -712,6 +872,42 @@ def test_cpp_extensions_aot_ninja(test_module, test_directory, options):
 
 def test_cpp_extensions_aot_no_ninja(test_module, test_directory, options):
     return _test_cpp_extensions_aot(test_directory, options, use_ninja=False)
+
+
+def test_autoload_enable(test_module, test_directory, options):
+    return _test_autoload(test_directory, options, enable=True)
+
+
+def test_autoload_disable(test_module, test_directory, options):
+    return _test_autoload(test_directory, options, enable=False)
+
+
+def _test_autoload(test_directory, options, enable=True):
+    cpp_extensions_test_dir = os.path.join(test_directory, "cpp_extensions")
+    install_directory, return_code = install_cpp_extensions(cpp_extensions_test_dir)
+    if return_code != 0:
+        return return_code
+
+    try:
+        os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = str(int(enable))
+        with extend_python_path([install_directory]):
+            cmd = [sys.executable, "test_autoload.py"]
+            return_code = shell(cmd, cwd=test_directory, env=os.environ)
+            return return_code
+    finally:
+        os.environ.pop("TORCH_DEVICE_BACKEND_AUTOLOAD")
+
+
+def run_test_with_openreg(test_module, test_directory, options):
+    openreg_dir = os.path.join(
+        test_directory, "cpp_extensions", "open_registration_extension"
+    )
+    install_dir, return_code = install_cpp_extensions(openreg_dir)
+    if return_code != 0:
+        return return_code
+
+    with extend_python_path([install_dir]):
+        return run_test(test_module, test_directory, options)
 
 
 def test_distributed(test_module, test_directory, options):
@@ -732,23 +928,19 @@ def test_distributed(test_module, test_directory, options):
             if sys.platform == "win32" and not with_init_file:
                 continue
             tmp_dir = tempfile.mkdtemp()
+            init_method = "file" if with_init_file else "env"
             if options.verbose:
-                init_str = "with {} init_method"
-                with_init = init_str.format("file" if with_init_file else "env")
+                with_init = f"with {init_method} init_method"
                 print_to_stderr(
                     f"Running distributed tests for the {backend} backend {with_init}"
                 )
             old_environ = dict(os.environ)
             os.environ["TEMP_DIR"] = tmp_dir
             os.environ["BACKEND"] = backend
-            os.environ["INIT_METHOD"] = "env://"
             os.environ.update(env_vars)
-            if with_init_file:
-                if test_module.name == "test_distributed_spawn":
-                    init_method = f"{FILE_SCHEMA}{tmp_dir}/"
-                else:
-                    init_method = f"{FILE_SCHEMA}{tmp_dir}/shared_init_file"
-                os.environ["INIT_METHOD"] = init_method
+            report_tag = f"dist-{backend}" if backend != "test" else ""
+            report_tag += f"-init-{init_method}"
+            os.environ["TEST_REPORT_SOURCE_OVERRIDE"] = report_tag
             try:
                 os.mkdir(os.path.join(tmp_dir, "barrier"))
                 os.mkdir(os.path.join(tmp_dir, "test_dir"))
@@ -804,11 +996,9 @@ def run_doctests(test_module, test_directory, options):
     Assumes the incoming test module is called doctest, and simply executes the
     xdoctest runner on the torch library itself.
     """
-    import pathlib
-
     import xdoctest
 
-    pkgpath = pathlib.Path(torch.__file__).parent
+    pkgpath = Path(torch.__file__).parent
 
     exclude_module_list = ["torch._vendor.*"]
     enabled = {
@@ -890,6 +1080,9 @@ def run_doctests(test_module, test_directory, options):
     if enabled["onnx"]:
         os.environ["TORCH_DOCTEST_ONNX"] = "1"
 
+    if torch.mps.is_available():
+        os.environ["TORCH_DOCTEST_MPS"] = "1"
+
     if 0:
         # TODO: could try to enable some of these
         os.environ["TORCH_DOCTEST_QUANTIZED_DYNAMIC"] = "1"
@@ -964,7 +1157,7 @@ def get_pytest_args(options, is_cpp_test=False, is_distributed_test=False):
     if RERUN_DISABLED_TESTS:
         # Distributed tests are too slow, so running them x50 will cause the jobs to timeout after
         # 3+ hours. So, let's opt for less number of reruns. We need at least 150 instances of the
-        # test every 2 weeks to satisfy the Rockset query (15 x 14 = 210). The same logic applies
+        # test every 2 weeks to satisfy the SQL query (15 x 14 = 210). The same logic applies
         # to ASAN, which is also slow
         count = 15 if is_distributed_test or TEST_WITH_ASAN else 50
         # When under rerun-disabled-tests mode, run the same tests multiple times to determine their
@@ -988,7 +1181,7 @@ def get_pytest_args(options, is_cpp_test=False, is_distributed_test=False):
         # is much slower than running them directly
         pytest_args.extend(["-n", str(NUM_PROCS)])
 
-        if IS_CI:
+        if TEST_SAVE_XML:
             # Add the option to generate XML test report here as C++ tests
             # won't go into common_utils
             test_report_path = get_report_path(pytest=True)
@@ -1002,9 +1195,9 @@ def get_pytest_args(options, is_cpp_test=False, is_distributed_test=False):
 
 
 def run_ci_sanity_check(test: ShardedTest, test_directory, options):
-    assert (
-        test.name == "test_ci_sanity_check_fail"
-    ), f"This handler only works for test_ci_sanity_check_fail, got {test.name}"
+    assert test.name == "test_ci_sanity_check_fail", (
+        f"This handler only works for test_ci_sanity_check_fail, got {test.name}"
+    )
     ret_code = run_test(test, test_directory, options, print_log=False)
     # This test should fail
     if ret_code != 1:
@@ -1041,6 +1234,11 @@ CUSTOM_HANDLERS = {
     "distributed/rpc/cuda/test_tensorpipe_agent": run_test_with_subprocess,
     "doctests": run_doctests,
     "test_ci_sanity_check_fail": run_ci_sanity_check,
+    "test_autoload_enable": test_autoload_enable,
+    "test_autoload_disable": test_autoload_disable,
+    "test_cpp_extensions_open_device_registration": run_test_with_openreg,
+    "test_openreg": run_test_with_openreg,
+    "test_transformers_privateuse1": run_test_with_openreg,
 }
 
 
@@ -1052,7 +1250,6 @@ def parse_args():
         description="Run the PyTorch unit test suite",
         epilog="where TESTS is any of: {}".format(", ".join(TESTS)),
         formatter_class=argparse.RawTextHelpFormatter,
-        parents=[common_parser],
     )
     parser.add_argument(
         "-v",
@@ -1060,6 +1257,12 @@ def parse_args():
         action="count",
         default=0,
         help="Print verbose information and test-by-test results",
+    )
+    parser.add_argument(
+        "--showlocals",
+        action=argparse.BooleanOptionalAction,
+        default=strtobool(os.environ.get("TEST_SHOWLOCALS", "False")),
+        help="Show local variables in tracebacks (default: True)",
     )
     parser.add_argument("--jit", "--jit", action="store_true", help="run all jit tests")
     parser.add_argument(
@@ -1180,24 +1383,16 @@ def parse_args():
         default=IS_CI
         and (
             TEST_WITH_CROSSREF
-            or TEST_WITH_ASAN
-            or (
-                strtobool(os.environ.get("TD_DISTRIBUTED", "False"))
-                and os.getenv("TEST_CONFIG") == "distributed"
-                and TEST_CUDA
-            )
-            or (IS_WINDOWS and not TEST_CUDA)
+            or TEST_CONFIG == "distributed"
+            or TEST_CONFIG == "default"
         )
         and get_pr_number() is not None
         and not strtobool(os.environ.get("NO_TD", "False"))
-        and "slow" not in os.getenv("TEST_CONFIG", "")
-        and "slow" not in os.getenv("BUILD_ENVIRONMENT", ""),
-    )
-    parser.add_argument(
-        "additional_unittest_args",
-        nargs="*",
-        help="additional arguments passed through to unittest, e.g., "
-        "python run_test.py -i sparse -- TestSparse.test_factory_size_check",
+        and not TEST_WITH_ROCM
+        and not IS_MACOS
+        and "xpu" not in BUILD_ENVIRONMENT
+        and "onnx" not in BUILD_ENVIRONMENT
+        and os.environ.get("GITHUB_WORKFLOW", "slow") in ("trunk", "pull"),
     )
     parser.add_argument(
         "--shard",
@@ -1216,6 +1411,11 @@ def parse_args():
         "--exclude-torch-export-tests",
         action="store_true",
         help="exclude torch export tests",
+    )
+    parser.add_argument(
+        "--exclude-aot-dispatch-tests",
+        action="store_true",
+        help="exclude aot dispatch tests",
     )
     parser.add_argument(
         "--exclude-distributed-tests",
@@ -1247,6 +1447,10 @@ def parse_args():
         action="store_false",
         help="Run tests without translation validation.",
     )
+    parser.add_argument(
+        "--upload-artifacts-while-running",
+        action="store_true",
+    )
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -1260,7 +1464,11 @@ def parse_args():
         help="Run tests with TorchInductor turned on",
     )
 
-    return parser.parse_args()
+    args, extra = parser.parse_known_args()
+    if "--" in extra:
+        extra.remove("--")
+    args.additional_args = extra
+    return args
 
 
 def exclude_tests(
@@ -1298,7 +1506,7 @@ def can_run_in_pytest(test):
     return os.getenv("PYTORCH_TEST_DO_NOT_USE_PYTEST", "0") == "0"
 
 
-def get_selected_tests(options) -> List[str]:
+def get_selected_tests(options) -> list[str]:
     selected_tests = options.include
 
     # filter if there's JIT only and distributed only test options
@@ -1320,17 +1528,32 @@ def get_selected_tests(options) -> List[str]:
 
     # Filter to only run functorch tests when --functorch option is specified
     if options.functorch:
-        selected_tests = [tname for tname in selected_tests if tname in FUNCTORCH_TESTS]
+        selected_tests = list(
+            filter(lambda test_name: test_name in FUNCTORCH_TESTS, selected_tests)
+        )
 
     if options.cpp:
-        selected_tests = [tname for tname in selected_tests if tname in CPP_TESTS]
+        selected_tests = list(
+            filter(lambda test_name: test_name in CPP_TESTS, selected_tests)
+        )
     else:
         # Exclude all C++ tests otherwise as they are still handled differently
         # than Python test at the moment
         options.exclude.extend(CPP_TESTS)
 
     if options.mps:
-        selected_tests = ["test_mps", "test_metal", "test_modules"]
+        selected_tests = [
+            "test_mps",
+            "test_metal",
+            "test_modules",
+            "nn/test_convolution",
+            "nn/test_dropout",
+            "nn/test_pooling",
+            "test_view_ops",
+            "test_nn",
+            "inductor/test_mps_basic",
+            "inductor/test_torchinductor",
+        ]
     else:
         # Exclude all mps tests otherwise
         options.exclude.extend(["test_mps", "test_metal"])
@@ -1362,6 +1585,9 @@ def get_selected_tests(options) -> List[str]:
     if options.exclude_torch_export_tests:
         options.exclude.extend(TORCH_EXPORT_TESTS)
 
+    if options.exclude_aot_dispatch_tests:
+        options.exclude.extend(AOT_DISPATCH_TESTS)
+
     # these tests failing in CUDA 11.6 temporary disabling. issue https://github.com/pytorch/pytorch/issues/75375
     if torch.version.cuda is not None:
         options.exclude.extend(["distributions/test_constraints"])
@@ -1376,6 +1602,13 @@ def get_selected_tests(options) -> List[str]:
                 "functorch/test_memory_efficient_fusion",
                 "torch_np/numpy_tests/core/test_multiarray",
             ]
+        )
+
+    if sys.version_info[:2] < (3, 13):
+        # Skip tests for older Python versions as they may use syntax or features
+        # not supported in those versions
+        options.exclude.extend(
+            [test for test in selected_tests if test.startswith("dynamo/cpython/3_13/")]
         )
 
     selected_tests = exclude_tests(options.exclude, selected_tests)
@@ -1393,6 +1626,14 @@ def get_selected_tests(options) -> List[str]:
 
     elif TEST_WITH_ROCM:
         selected_tests = exclude_tests(ROCM_BLOCKLIST, selected_tests, "on ROCm")
+
+    elif IS_S390X:
+        selected_tests = exclude_tests(S390X_BLOCKLIST, selected_tests, "on s390x")
+        selected_tests = exclude_tests(
+            DISTRIBUTED_TESTS,
+            selected_tests,
+            "Skip distributed tests on s390x",
+        )
 
     # skip all distributed tests if distributed package is not available.
     if not dist.is_available():
@@ -1414,8 +1655,7 @@ def get_selected_tests(options) -> List[str]:
         selected_tests = exclude_tests(
             TESTS_NOT_USING_GRADCHECK,
             selected_tests,
-            "Running in slow gradcheck mode, skipping tests "
-            "that don't use gradcheck.",
+            "Running in slow gradcheck mode, skipping tests that don't use gradcheck.",
             exact_match=True,
         )
 
@@ -1423,9 +1663,7 @@ def get_selected_tests(options) -> List[str]:
     return selected_tests
 
 
-def load_test_times_from_file(
-    file: str,
-) -> Dict[str, Any]:
+def load_test_times_from_file(file: str) -> dict[str, Any]:
     # Load previous test times to make sharding decisions
     path = os.path.join(str(REPO_ROOT), file)
     if not os.path.exists(path):
@@ -1435,47 +1673,52 @@ def load_test_times_from_file(
         return {}
 
     with open(path) as f:
-        test_times_file = cast(Dict[str, Any], json.load(f))
-    build_environment = os.environ.get("BUILD_ENVIRONMENT")
+        test_times_file = cast(dict[str, Any], json.load(f))
+    job_name = os.environ.get("JOB_NAME")
+    if job_name is None or job_name == "":
+        # If job name isn't available, use build environment as a backup
+        job_name = os.environ.get("BUILD_ENVIRONMENT")
+    else:
+        job_name = job_name.split(" / test (")[0]
     test_config = os.environ.get("TEST_CONFIG")
-    if test_config in test_times_file.get(build_environment, {}):
+    if test_config in test_times_file.get(job_name, {}):
         print_to_stderr("Found test times from artifacts")
-        return test_times_file[build_environment][test_config]
+        return test_times_file[job_name][test_config]
     elif test_config in test_times_file["default"]:
         print_to_stderr(
-            f"::warning:: Gathered no stats from artifacts for {build_environment} build env"
-            f" and {test_config} test config. Using default build env and {test_config} test config instead."
+            f"::warning:: Gathered no stats from artifacts for {job_name} build env"
+            f" and {test_config} test config. Using default job name and {test_config} test config instead."
         )
         return test_times_file["default"][test_config]
     else:
         print_to_stderr(
-            f"::warning:: Gathered no stats from artifacts for build env {build_environment} build env"
-            f" and {test_config} test config. Using default build env and default test config instead."
+            f"::warning:: Gathered no stats from artifacts for job name {job_name} build env"
+            f" and {test_config} test config. Using default job name and default test config instead."
         )
         return test_times_file["default"]["default"]
 
 
 def load_test_file_times(
     file: str = ADDITIONAL_CI_FILES_FOLDER / TEST_TIMES_FILE,
-) -> Dict[str, float]:
-    return cast(Dict[str, float], load_test_times_from_file(file))
+) -> dict[str, float]:
+    return cast(dict[str, float], load_test_times_from_file(file))
 
 
 def load_test_class_times(
     file: str = ADDITIONAL_CI_FILES_FOLDER / TEST_CLASS_TIMES_FILE,
-) -> Dict[str, Dict[str, float]]:
-    return cast(Dict[str, Dict[str, float]], load_test_times_from_file(file))
+) -> dict[str, dict[str, float]]:
+    return cast(dict[str, dict[str, float]], load_test_times_from_file(file))
 
 
-def get_sharding_opts(options) -> Tuple[int, int]:
+def get_sharding_opts(options) -> tuple[int, int]:
     which_shard, num_shards = 1, 1
     if options.shard:
         assert len(options.shard) == 2, "Unexpected shard format"
         assert min(options.shard) > 0, "Shards must be positive numbers"
         which_shard, num_shards = options.shard
-        assert (
-            which_shard <= num_shards
-        ), "Selected shard must be less than or equal to total number of shards"
+        assert which_shard <= num_shards, (
+            "Selected shard must be less than or equal to total number of shards"
+        )
 
     return (which_shard, num_shards)
 
@@ -1483,10 +1726,10 @@ def get_sharding_opts(options) -> Tuple[int, int]:
 def do_sharding(
     options,
     selected_tests: Sequence[TestRun],
-    test_file_times: Dict[str, float],
-    test_class_times: Dict[str, Dict[str, float]],
+    test_file_times: dict[str, float],
+    test_class_times: dict[str, dict[str, float]],
     sort_by_time: bool = True,
-) -> Tuple[float, List[ShardedTest]]:
+) -> tuple[float, list[ShardedTest]]:
     which_shard, num_shards = get_sharding_opts(options)
 
     # Do sharding
@@ -1518,9 +1761,9 @@ def run_test_module(
         print_to_stderr(f"Running {str(test)} ... [{datetime.now()}]")
         handler = CUSTOM_HANDLERS.get(test_name, run_test)
         return_code = handler(test, test_directory, options)
-        assert isinstance(return_code, int) and not isinstance(
-            return_code, bool
-        ), f"While running {str(test)} got non integer return code {return_code}"
+        assert isinstance(return_code, int) and not isinstance(return_code, bool), (
+            f"While running {str(test)} got non integer return code {return_code}"
+        )
         if return_code == 0:
             return None
 
@@ -1536,10 +1779,10 @@ def run_test_module(
 
 
 def run_tests(
-    selected_tests: List[ShardedTest],
+    selected_tests: list[ShardedTest],
     test_directory: str,
     options,
-    failures: List[TestFailure],
+    failures: list[TestFailure],
 ) -> None:
     if len(selected_tests) == 0:
         return
@@ -1550,11 +1793,6 @@ def run_tests(
     selected_tests_serial = [
         x for x in selected_tests if x not in selected_tests_parallel
     ]
-
-    # See Note [ROCm parallel CI testing]
-    pool = get_context("spawn").Pool(
-        NUM_PROCS, maxtasksperchild=None if torch.version.hip else 1
-    )
 
     # NB: This is a hack to make conftest.py and files it depends on available
     # on CPP_TESTS_DIR. We should see if the file could be turned into a
@@ -1573,21 +1811,15 @@ def run_tests(
         ):
             shutil.copy(os.path.join(test_directory, conftest_file), cpp_file)
 
-    def handle_error_messages(failure: Optional[TestFailure]):
-        if failure is None:
+    def handle_complete(failure: Optional[TestFailure]):
+        failed = failure is not None
+        if IS_CI and options.upload_artifacts_while_running:
+            zip_and_upload_artifacts(failed)
+        if not failed:
             return False
         failures.append(failure)
         print_to_stderr(failure.message)
         return True
-
-    def parallel_test_completion_callback(failure):
-        test_failed = handle_error_messages(failure)
-        if (
-            test_failed
-            and not options.continue_through_error
-            and not RERUN_DISABLED_TESTS
-        ):
-            pool.terminate()
 
     keep_going_message = (
         "\n\nTip: You can keep running tests even on failure by passing --keep-going to run_test.py.\n"
@@ -1600,7 +1832,7 @@ def run_tests(
             if can_run_in_pytest(test):
                 options_clone.pytest = True
             failure = run_test_module(test, test_directory, options_clone)
-            test_failed = handle_error_messages(failure)
+            test_failed = handle_complete(failure)
             if (
                 test_failed
                 and not options.continue_through_error
@@ -1613,9 +1845,9 @@ def run_tests(
             options_clone = copy.deepcopy(options)
             if can_run_in_pytest(test):
                 options_clone.pytest = True
-            options_clone.additional_unittest_args.extend(["-m", "serial"])
+            options_clone.additional_args.extend(["-m", "serial"])
             failure = run_test_module(test, test_directory, options_clone)
-            test_failed = handle_error_messages(failure)
+            test_failed = handle_complete(failure)
             if (
                 test_failed
                 and not options.continue_through_error
@@ -1624,11 +1856,26 @@ def run_tests(
                 raise RuntimeError(failure.message + keep_going_message)
 
         os.environ["NUM_PARALLEL_PROCS"] = str(NUM_PROCS)
+
+        # See Note [ROCm parallel CI testing]
+        pool = get_context("spawn").Pool(
+            NUM_PROCS, maxtasksperchild=None if torch.version.hip else 1
+        )
+
+        def parallel_test_completion_callback(failure):
+            test_failed = handle_complete(failure)
+            if (
+                test_failed
+                and not options.continue_through_error
+                and not RERUN_DISABLED_TESTS
+            ):
+                pool.terminate()
+
         for test in selected_tests_parallel:
             options_clone = copy.deepcopy(options)
             if can_run_in_pytest(test):
                 options_clone.pytest = True
-            options_clone.additional_unittest_args.extend(["-m", "not serial"])
+            options_clone.additional_args.extend(["-m", "not serial"])
             pool.apply_async(
                 run_test_module,
                 args=(test, test_directory, options_clone),
@@ -1674,6 +1921,8 @@ def main():
     selected_tests = get_selected_tests(options)
 
     test_prioritizations = import_results()
+    if len(test_prioritizations.get_all_tests()) == 0:
+        options.enable_td = False
     test_prioritizations.amend_tests(selected_tests)
 
     os.makedirs(REPO_ROOT / "test" / "test-reports", exist_ok=True)
@@ -1692,8 +1941,8 @@ def main():
         """Defines a set of tests with similar priority that should be run together on the current shard"""
 
         name: str
-        sharded_tests: List[ShardedTest]
-        failures: List[TestFailure]
+        sharded_tests: list[ShardedTest]
+        failures: list[TestFailure]
 
         def __init__(
             self, name: str, raw_tests: Sequence[TestRun], should_sort_shard: bool
@@ -1750,12 +1999,12 @@ def main():
     try:
         # Actually run the tests
         start_time = time.time()
-        elapsed_time = time.time() - start_time
-        print_to_stderr(
-            f"Starting test batch '{test_batch.name}' {round(elapsed_time, 2)} seconds after initiating testing"
-        )
         run_tests(
             test_batch.sharded_tests, test_directory, options, test_batch.failures
+        )
+        elapsed_time = time.time() - start_time
+        print_to_stderr(
+            f"Running test batch '{test_batch.name}' cost {round(elapsed_time, 2)} seconds"
         )
 
     finally:
@@ -1785,6 +2034,9 @@ def main():
                         **test_stats,
                     },
                 )
+            gen_additional_test_failures_file(
+                [test.test_file for test, _ in all_failures]
+            )
 
     if len(all_failures):
         for _, err in all_failures:

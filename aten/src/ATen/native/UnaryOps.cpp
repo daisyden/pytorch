@@ -258,26 +258,26 @@ TORCH_META_FUNC(neg)(const Tensor& self) {
 
 TORCH_META_FUNC(trunc) (const Tensor& self) {
   // Note: this is consistent with NumPy
-  TORCH_CHECK(!self.is_complex(),
+  TORCH_CHECK_NOT_IMPLEMENTED(!self.is_complex(),
     "trunc is not supported for complex inputs");
   build_borrowing_unary_op(maybe_get_output(), self);
 }
 
 TORCH_META_FUNC(floor) (const Tensor& self) {
   // Note: this is consistent with NumPy
-  TORCH_CHECK(!self.is_complex(),
+  TORCH_CHECK_NOT_IMPLEMENTED(!self.is_complex(),
     "floor is not supported for complex inputs");
   build_borrowing_unary_op(maybe_get_output(), self);
 }
 
 TORCH_META_FUNC(sign) (const Tensor& self) {
-  TORCH_CHECK(!self.is_complex(),
+  TORCH_CHECK_NOT_IMPLEMENTED(!self.is_complex(),
               "Unlike NumPy, torch.sign is not intended to support complex numbers. Please use torch.sgn instead.");
   build_borrowing_unary_op(maybe_get_output(), self);
 }
 
 TORCH_META_FUNC(signbit) (const Tensor& self) {
-  TORCH_CHECK(!self.is_complex(), "signbit is not implemented for complex tensors.");
+  TORCH_CHECK_NOT_IMPLEMENTED(!self.is_complex(), "signbit is not implemented for complex tensors.");
   TORCH_CHECK(maybe_get_output().defined() ? maybe_get_output().dtype() == at::kBool : true,
               "signbit does not support non-boolean outputs.");
   build_borrowing_unary_force_boolean_op(maybe_get_output(), self);
@@ -285,7 +285,7 @@ TORCH_META_FUNC(signbit) (const Tensor& self) {
 
 TORCH_META_FUNC(ceil) (const Tensor& self) {
   // Note: this is consistent with NumPy
-  TORCH_CHECK(!self.is_complex(),
+  TORCH_CHECK_NOT_IMPLEMENTED(!self.is_complex(),
     "ceil is not supported for complex inputs");
   build_borrowing_unary_op(maybe_get_output(), self);
 }
@@ -620,7 +620,8 @@ Tensor _conj_physical(const Tensor& self) {
   if (self.is_conj()) {
     return self.conj().clone();
   }
-  return unary_op_impl(self, at::conj_physical_out);
+  auto result = at::empty_like(self);
+  return at::conj_physical_out(result, self);
 }
 
 Tensor conj_physical(const Tensor& self) {
@@ -772,23 +773,23 @@ Tensor square(const Tensor& self) { return at::pow(self, 2); }
 Tensor& square_(Tensor& self) { return self.pow_(2); }
 
 Tensor& logit_out(const Tensor& self,
-    c10::optional<double> eps,
+    std::optional<double> eps,
     Tensor& result) {
   return unary_op_impl_float_out(
       result, self, logit_stub, Scalar(eps ? eps.value() : -1.0));
 }
-Tensor logit(const Tensor& self, c10::optional<double> eps) {
+Tensor logit(const Tensor& self, std::optional<double> eps) {
   return unary_op_impl_float(
       self, logit_stub, Scalar(eps ? eps.value() : -1.0));
 }
-Tensor& logit_(Tensor& self, c10::optional<double> eps) {
+Tensor& logit_(Tensor& self, std::optional<double> eps) {
   return at::logit_out(self, self, eps);
 }
 
-Tensor& special_logit_out(const Tensor& self, c10::optional<double> eps, Tensor& result) {
+Tensor& special_logit_out(const Tensor& self, std::optional<double> eps, Tensor& result) {
   return at::logit_out(result, self, eps);
 }
-Tensor special_logit(const Tensor& self, c10::optional<double> eps) {
+Tensor special_logit(const Tensor& self, std::optional<double> eps) {
   return self.logit(eps);
 }
 
@@ -801,9 +802,9 @@ Tensor special_expit(const Tensor& self) {
 }
 
 Tensor& nan_to_num_out(const Tensor& self,
-    c10::optional<double> nan,
-    c10::optional<double> pos_inf,
-    c10::optional<double> neg_inf,
+    std::optional<double> nan,
+    std::optional<double> pos_inf,
+    std::optional<double> neg_inf,
     Tensor& result) {
   TORCH_CHECK(
       self.scalar_type() == result.scalar_type(),
@@ -825,18 +826,18 @@ Tensor& nan_to_num_out(const Tensor& self,
 
 Tensor nan_to_num(
     const Tensor& self,
-    c10::optional<double> nan,
-    c10::optional<double> pos_inf,
-    c10::optional<double> neg_inf) {
+    std::optional<double> nan,
+    std::optional<double> pos_inf,
+    std::optional<double> neg_inf) {
   auto result = at::empty_like(self);
   return at::nan_to_num_out(result, self, nan, pos_inf, neg_inf);
 }
 
 Tensor& nan_to_num_(
     Tensor& self,
-    c10::optional<double> nan,
-    c10::optional<double> pos_inf,
-    c10::optional<double> neg_inf) {
+    std::optional<double> nan,
+    std::optional<double> pos_inf,
+    std::optional<double> neg_inf) {
   return at::nan_to_num_out(self, self, nan, pos_inf, neg_inf);
 }
 
@@ -886,7 +887,7 @@ static inline void mvlgamma_check(const Tensor& self, int64_t p) {
 Tensor mvlgamma(const Tensor& self, int64_t p) {
   mvlgamma_check(self, p);
   auto dtype = c10::scalarTypeToTypeMeta(self.scalar_type());
-  if (at::isIntegralType(self.scalar_type(), /*include_bool=*/true)) {
+  if (at::isIntegralType(self.scalar_type(), /*includeBool=*/true)) {
     // int -> float promotion
     dtype = c10::get_default_dtype();
   }
@@ -932,11 +933,11 @@ Tensor& mvlgamma_out(const Tensor& self, int64_t p, Tensor& result) {
 
 Tensor special_multigammaln(const Tensor& self, int64_t p) {
   return self.mvlgamma(p);
-};
+}
 
 Tensor& special_multigammaln_out(const Tensor& self, int64_t p, Tensor& result) {
   return at::mvlgamma_out(result, self, p);
-};
+}
 
 std::tuple<Tensor, Tensor> frexp(const Tensor& self) {
   Tensor mantissa = at::empty_like(self);

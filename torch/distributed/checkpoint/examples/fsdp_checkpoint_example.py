@@ -1,3 +1,4 @@
+# mypy: allow-untyped-defs
 # Copyright (c) Meta Platforms, Inc. and affiliates
 
 """
@@ -15,11 +16,11 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dist_cp
 import torch.multiprocessing as mp
 from torch.distributed.checkpoint.optimizer import load_sharded_optimizer_state_dict
-
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.fully_sharded_data_parallel import StateDictType
 
-CHECKPOINT_DIR = f"/scratch/{os.environ['LOGNAME']}/checkpoint"
+
+CHECKPOINT_DIR = f"/scratch/{os.environ.get('LOGNAME', '')}/checkpoint"
 
 
 def opt_at(opt, idx):

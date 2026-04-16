@@ -4,6 +4,7 @@ import unittest
 
 from torch._lazy.ts_backend import init as init_ts_backend
 
+
 init_ts_backend()
 import copy
 import dis
@@ -44,7 +45,7 @@ class ModuleReturnMulti(nn.Module):
 # The default fx tracer will convert torch.randn to a constant.. We may need
 # a custom tracer.
 # class ModuleEagerTensor(nn.Module):
-#     def __init__(self):
+#     def __init__(self) -> None:
 #         super().__init__()
 #
 #     def forward(self, a):
@@ -59,7 +60,7 @@ class ModuleReturnMulti(nn.Module):
 # Unfortunately, the default fx tracer convert the return value of the forward
 # method to a constant.. Comment out for now
 # class ModuleReturnEagerTensorOnDefaultDevice(nn.Module):
-#     def __init__(self):
+#     def __init__(self) -> None:
 #         super().__init__()
 #
 #     def forward(self):
@@ -130,7 +131,7 @@ def allclose(expected, actual):
 
 def verify_reusing_compiled_graph(mod, exception_msg_pattern, ncase=10):
     args = gen_rand_args(mod)
-    out = mod(*args)
+    mod(*args)
 
     dis.dis(mod.forward)
 
@@ -205,3 +206,10 @@ class OptimizeTest(unittest.TestCase):
     test_return_multi = maketest(ModuleReturnMulti)
     test_return_dup_tensor = maketest(ModuleReturnDupTensor)
     test_inplace_update = maketest(ModuleInplaceUpdate)
+
+
+if __name__ == "__main__":
+    raise RuntimeError(
+        "This test is not currently used and should be "
+        "enabled in discover_tests.py if required."
+    )

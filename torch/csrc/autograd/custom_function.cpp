@@ -1,4 +1,5 @@
 #include <c10/util/irange.h>
+#include <torch/csrc/autograd/VariableTypeUtils.h>
 #include <torch/csrc/autograd/autograd.h>
 #include <torch/csrc/autograd/custom_function.h>
 #include <torch/csrc/autograd/functions/accumulate_grad.h>
@@ -28,7 +29,7 @@ namespace torch::autograd {
 static void _process_forward_mode_AD(
     const variable_list& inputs,
     std::unordered_map<at::TensorImpl*, size_t> inputs_mapping,
-    const at::ArrayRef<c10::optional<Variable>> raw_outputs,
+    const at::ArrayRef<std::optional<Variable>> raw_outputs,
     const optional_variable_list& outputs,
     const std::unordered_set<at::TensorImpl*>& non_differentiable,
     const std::unordered_set<at::TensorImpl*>& dirty_inputs,
@@ -97,7 +98,6 @@ static void _process_forward_mode_AD(
     forward_grads = jvp_user_function(inputs, std::move(input_grads));
   }
 
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   const auto num_forward_grads = forward_grads.size();
   // contrary to backward mode, we don't allow returning too many gradients
   TORCH_CHECK(
@@ -258,17 +258,19 @@ static optional_variable_list _process_backward_mode_ad(
     const std::unordered_map<at::TensorImpl*, size_t>& inputs_mapping,
     const std::unordered_set<at::TensorImpl*>& non_differentiable,
     const std::unordered_set<at::TensorImpl*>& dirty_inputs,
-    const at::ArrayRef<c10::optional<Variable>> raw_outputs,
+    const at::ArrayRef<std::optional<Variable>> raw_outputs,
     const std::shared_ptr<Node>& cdata,
     const std::unordered_set<at::TensorImpl*>& to_save_if_setup_context,
     const _view_as_self_fn_t& view_as_self_fn) {
   auto num_outputs = raw_outputs.size();
 
+#ifndef STRIP_ERROR_MESSAGES
   const char* error_msg_input_returned_as_is =
       "A input that has been returned as-is as output is being saved for backward. "
       "This is not supported if you override setup_context. You should return and "
       "save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside "
       "the forward function itself.";
+#endif
 
   // Sets the grad_fn and output_nr of an output Variable.
   auto set_history = [&](Variable& var,
@@ -308,9 +310,13 @@ static optional_variable_list _process_backward_mode_ad(
       }
       // No need to mark as modified Tensors that are not inputs.
       if (!is_input) {
-        TORCH_WARN(
-            "Only input Tensors should be given to ctx.mark_dirty(). If a Tensor is not an input, there"
-            " is no need to pass it to mark_dirty().");
+        const char* mark_dirty_error_msg =
+            "ctx.mark_dirty() received a tensor that was not an input. "
+            "Only input Tensors that have been mutated should be passed to "
+            "ctx.mark_dirty().";
+        // We reach this path in the view of intermediate case
+        TORCH_CHECK(!var.is_view(), mark_dirty_error_msg);
+        TORCH_WARN(mark_dirty_error_msg);
       }
       // If the input is a view, the rebase will need to rewrite the graph and
       // this only works if we have a single output to this Function.
@@ -332,14 +338,14 @@ static optional_variable_list _process_backward_mode_ad(
         auto& grad_acc = dynamic_cast<AccumulateGrad&>(*grad_acc_fn);
         grad_acc.variable.reset();
       }
-      if (cdata) {
-        impl::rebase_history(var, {cdata, output_nr});
-      }
+      // This repeats the mutation of leaf variables check already done above
+      check_inplace(var, true);
+      impl::rebase_history(var, {cdata, output_nr});
     } else if (is_input) {
       TORCH_CHECK(!is_saved_and_setup_context, error_msg_input_returned_as_is)
       var = _view_as_self_with_no_grad(var, view_as_self_fn);
       impl::set_gradient_edge(var, {cdata, output_nr});
-    } else if (cdata) {
+    } else {
       impl::set_gradient_edge(var, {cdata, output_nr});
     }
   };
@@ -438,7 +444,7 @@ optional_variable_list _wrap_outputs(
     const variable_list& input_vars,
     const std::unordered_set<at::TensorImpl*>& non_differentiable,
     const std::unordered_set<at::TensorImpl*>& dirty_inputs,
-    const at::ArrayRef<c10::optional<Variable>> raw_outputs,
+    const at::ArrayRef<std::optional<Variable>> raw_outputs,
     const std::shared_ptr<Node>& cdata,
     const _jvp_fn_t& jvp_user_function,
     const std::unordered_set<at::TensorImpl*>& to_save_if_setup_context,
@@ -502,6 +508,16 @@ void check_variable_result(
   }
 }
 
+AutogradContext::AutogradContext(PackedArgs& packed_args) {
+  saved_data = packed_args.unpack_saved_data();
+  saved_variables_override_ = packed_args.unpack<variable_list>();
+  // NOLINTNEXTLINE(cppcoreguidelines-prefer-member-initializer)
+  materialize_grads_ = packed_args.unpack<bool>();
+  // NOLINTNEXTLINE(cppcoreguidelines-prefer-member-initializer)
+  has_freed_buffers_ = packed_args.unpack<bool>();
+  needs_input_grad_override_ = packed_args.unpack<std::vector<bool>>();
+}
+
 void AutogradContext::save_for_backward(variable_list to_save) {
   to_save_ = std::move(to_save);
 }
@@ -526,6 +542,9 @@ void AutogradContext::save_variables() {
 
 variable_list AutogradContext::get_saved_variables() const {
   TORCH_CHECK(!has_freed_buffers_, ERR_BACKWARD_TWICE);
+  if (saved_variables_override_.has_value()) {
+    return *saved_variables_override_;
+  }
   variable_list saved;
   saved.reserve(saved_variables_.size());
   auto ptr = grad_fn_.lock();
@@ -537,6 +556,9 @@ variable_list AutogradContext::get_saved_variables() const {
 }
 
 bool AutogradContext::needs_input_grad(size_t output_edge_index) const {
+  if (needs_input_grad_override_.has_value()) {
+    return needs_input_grad_override_.value().at(output_edge_index);
+  }
   auto ptr = grad_fn_.lock();
   TORCH_INTERNAL_ASSERT(ptr);
   return ptr->task_should_compute_output(output_edge_index);
@@ -544,6 +566,15 @@ bool AutogradContext::needs_input_grad(size_t output_edge_index) const {
 
 bool AutogradContext::needs_input_grad(
     std::initializer_list<IndexRange> idxs) const {
+  if (needs_input_grad_override_.has_value()) {
+    return std::any_of(idxs.begin(), idxs.end(), [this](IndexRange range) {
+      bool result = false;
+      for (const auto i : c10::irange(range.first, range.second)) {
+        result |= needs_input_grad_override_.value().at(i);
+      }
+      return result;
+    });
+  }
   auto ptr = grad_fn_.lock();
   TORCH_INTERNAL_ASSERT(ptr);
   return ptr->task_should_compute_output(idxs);

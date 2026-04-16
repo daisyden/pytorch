@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import concurrent.futures
 import json
@@ -7,14 +9,10 @@ import subprocess
 import sys
 import time
 from enum import Enum
-from typing import Any, BinaryIO, List, NamedTuple, Optional
+from typing import BinaryIO, NamedTuple
 
 
 IS_WINDOWS: bool = os.name == "nt"
-
-
-def eprint(*args: Any, **kwargs: Any) -> None:
-    print(*args, file=sys.stderr, flush=True, **kwargs)
 
 
 class LintSeverity(str, Enum):
@@ -25,15 +23,15 @@ class LintSeverity(str, Enum):
 
 
 class LintMessage(NamedTuple):
-    path: Optional[str]
-    line: Optional[int]
-    char: Optional[int]
+    path: str | None
+    line: int | None
+    char: int | None
     code: str
     severity: LintSeverity
     name: str
-    original: Optional[str]
-    replacement: Optional[str]
-    description: Optional[str]
+    original: str | None
+    replacement: str | None
+    description: str | None
 
 
 def as_posix(name: str) -> str:
@@ -41,11 +39,11 @@ def as_posix(name: str) -> str:
 
 
 def _run_command(
-    args: List[str],
+    args: list[str],
     *,
     stdin: BinaryIO,
     timeout: int,
-) -> "subprocess.CompletedProcess[bytes]":
+) -> subprocess.CompletedProcess[bytes]:
     logging.debug("$ %s", " ".join(args))
     start_time = time.monotonic()
     try:
@@ -63,12 +61,12 @@ def _run_command(
 
 
 def run_command(
-    args: List[str],
+    args: list[str],
     *,
     stdin: BinaryIO,
     retries: int,
     timeout: int,
-) -> "subprocess.CompletedProcess[bytes]":
+) -> subprocess.CompletedProcess[bytes]:
     remaining_retries = retries
     while True:
         try:
@@ -90,7 +88,7 @@ def check_file(
     filename: str,
     retries: int,
     timeout: int,
-) -> List[LintMessage]:
+) -> list[LintMessage]:
     try:
         with open(filename, "rb") as f:
             original = f.read()

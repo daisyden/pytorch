@@ -3,9 +3,7 @@
 #include <torch/csrc/profiler/stubs/base.h>
 #include <torch/csrc/profiler/util.h>
 
-namespace torch {
-namespace profiler {
-namespace impl {
+namespace torch::profiler::impl {
 
 struct NVTXThreadLocalState : ProfilerStateBase {
   explicit NVTXThreadLocalState(const ProfilerConfig& config)
@@ -126,7 +124,8 @@ static void updateOutputTensorTracker(const at::RecordFunction& fn) {
 }
 
 template <bool report_input_shapes>
-std::unique_ptr<at::ObserverContext> enterNVTX(const at::RecordFunction& fn) {
+static std::unique_ptr<at::ObserverContext> enterNVTX(
+    const at::RecordFunction& fn) {
   if (NVTXThreadLocalState::getTLS() != nullptr) {
     auto input_op_ids = getInputTensorOpIds(fn);
     torch::profiler::impl::cudaStubs()->rangePush(
@@ -174,6 +173,4 @@ void pushNVTXCallbacks(
   state_ptr->setCallbackHandle(handle);
 }
 
-} // namespace impl
-} // namespace profiler
-} // namespace torch
+} // namespace torch::profiler::impl

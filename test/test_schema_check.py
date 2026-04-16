@@ -1,4 +1,5 @@
 # Owner(s): ["oncall: jit"]
+# ruff: noqa: F841
 
 import os
 import sys
@@ -6,7 +7,7 @@ import torch
 from torch.utils._pytree import tree_map
 import unittest
 
-from torch.testing._internal.common_utils import run_tests
+from torch.testing._internal.common_utils import run_tests, TEST_WITH_TORCHDYNAMO
 from torch.fx.operator_schemas import normalize_function
 from torch._subclasses.schema_check_mode import SchemaCheckMode
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -94,6 +95,11 @@ class IncorrectAliasTensor(torch.Tensor):
 
 # Tests various schema checking functionalities.
 class TestSchemaCheck(JitTestCase):
+    def setUp(self):
+        if TEST_WITH_TORCHDYNAMO:
+            self.skipTest("SchemaCheckMode is ignored by dynamo")
+        super().setUp()
+
     # Tests that SchemaCheckMode records operator order with grad
     def test_schema_check_mode_operator_order(self):
         with SchemaCheckMode() as schema_check:
@@ -226,7 +232,7 @@ class TestSchemaCheck(JitTestCase):
             actual = x.relu().sin()
         self.assertEqual(expected, actual)
 
-    # Tests that SchemaCheckMode wraps torch.Tensor when an argument's default is overriden
+    # Tests that SchemaCheckMode wraps torch.Tensor when an argument's default is overridden
     def test_schema_check_mode_functionality_default_replaced(self):
         x = torch.rand((3, 3), requires_grad=True)
         expected = x.add(x, alpha=2)

@@ -4,20 +4,23 @@ import unittest
 
 import torch
 import torch._dynamo as torchdynamo
-
 from torch.ao.quantization.pt2e.graph_utils import (
     find_sequential_partitions,
     get_equivalent_types,
     update_equivalent_types_dict,
 )
-from torch.testing._internal.common_utils import IS_WINDOWS, TestCase
+from torch.testing._internal.common_utils import (
+    IS_WINDOWS,
+    raise_on_run_directly,
+    TestCase,
+)
 
 
 class TestGraphUtils(TestCase):
     @unittest.skipIf(IS_WINDOWS, "torch.compile is not supported on Windows")
     def test_conv_bn_conv_relu(self):
         class M(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.conv1 = torch.nn.Conv2d(3, 3, 3)
                 self.bn1 = torch.nn.BatchNorm2d(3)
@@ -33,7 +36,7 @@ class TestGraphUtils(TestCase):
         example_inputs = (torch.randn(1, 3, 5, 5),)
 
         # program capture
-        m, guards = torchdynamo.export(
+        m, guards = torchdynamo.export(  # noqa: F841
             m,
             *copy.deepcopy(example_inputs),
             aten_graph=True,
@@ -63,7 +66,7 @@ class TestGraphUtils(TestCase):
     @unittest.skipIf(IS_WINDOWS, "torch.compile is not supported on Windows")
     def test_conv_bn_relu(self):
         class M(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.bn1 = torch.nn.BatchNorm2d(3)
                 self.conv2 = torch.nn.Conv2d(3, 3, 3)
@@ -77,7 +80,7 @@ class TestGraphUtils(TestCase):
         example_inputs = (torch.randn(1, 3, 5, 5),)
 
         # program capture
-        m, guards = torchdynamo.export(
+        m, guards = torchdynamo.export(  # noqa: F841
             m,
             *copy.deepcopy(example_inputs),
             aten_graph=True,
@@ -98,7 +101,7 @@ class TestGraphUtils(TestCase):
     @unittest.skipIf(IS_WINDOWS, "torch.compile is not supported on Windows")
     def test_customized_equivalet_types_dict(self):
         class M(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.conv = torch.nn.Conv2d(3, 3, 3)
 
@@ -109,7 +112,7 @@ class TestGraphUtils(TestCase):
         example_inputs = (torch.randn(1, 3, 5, 5),)
 
         # program capture
-        m, guards = torchdynamo.export(
+        m, guards = torchdynamo.export(  # noqa: F841
             m,
             *copy.deepcopy(example_inputs),
             aten_graph=True,
@@ -122,3 +125,7 @@ class TestGraphUtils(TestCase):
             [torch.nn.Conv2d, torch.nn.ReLU6],
         )
         self.assertEqual(len(fused_partitions), 1)
+
+
+if __name__ == "__main__":
+    raise_on_run_directly("test/test_quantization.py")

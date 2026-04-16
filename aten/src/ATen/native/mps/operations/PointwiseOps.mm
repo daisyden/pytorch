@@ -19,7 +19,7 @@ static void addc_mul_div_out_mps(const Tensor& self,
                                  const Scalar& value_opt, // default value = 1.0
                                  const Tensor& output,
                                  const bool is_div,
-                                 const string op_name) {
+                                 const std::string& op_name) {
   if (value_opt.toDouble() == 0.0) {
     output.copy_(self);
     return;
@@ -38,7 +38,13 @@ static void addc_mul_div_out_mps(const Tensor& self,
   };
 
   @autoreleasepool {
-    string key = op_name + getTensorsStringKey({self, tensor1, tensor2});
+    bool contiguousOutput = !needsGather(output);
+    Tensor output_ = output;
+    if (!contiguousOutput) {
+      output_ = at::empty_like(self, MemoryFormat::Contiguous);
+    }
+
+    std::string key = op_name + getTensorsStringKey({self, tensor1, tensor2});
 
     auto cachedGraph = LookUpOrCreateCachedGraph<CachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
       ScalarType common_dtype =
@@ -75,7 +81,7 @@ static void addc_mul_div_out_mps(const Tensor& self,
     Placeholder selfPlaceholder = Placeholder(cachedGraph->inputTensor, self);
     Placeholder tensor1Placeholder = Placeholder(cachedGraph->firstTensor, tensor1);
     Placeholder tensor2Placeholder = Placeholder(cachedGraph->secondTensor, tensor2);
-    Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor, output);
+    Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor, !contiguousOutput ? output_ : output);
     MPSScalar value_scalar = getMPSScalar(value_opt, self.scalar_type());
 
     // Create dictionary of inputs and outputs
@@ -87,6 +93,10 @@ static void addc_mul_div_out_mps(const Tensor& self,
     };
 
     runMPSGraph(mpsStream, cachedGraph->graph(), feeds, outputPlaceholder);
+
+    if (!contiguousOutput) {
+      output.copy_(output_);
+    }
   }
 }
 

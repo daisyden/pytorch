@@ -28,7 +28,14 @@ struct VecConvert {
 };
 
 template <typename dst_t, typename src_t>
-inline Vectorized<dst_t> convert(const Vectorized<src_t>& src) {
+inline std::enable_if_t<std::is_same_v<dst_t, src_t>, Vectorized<src_t>> convert(
+    const Vectorized<src_t>& src) {
+  return src;
+}
+
+template <typename dst_t, typename src_t>
+inline std::enable_if_t<!std::is_same_v<dst_t, src_t>, Vectorized<dst_t>>
+convert(const Vectorized<src_t>& src) {
   return VecConvert<dst_t, 1, src_t, 1>::apply(src);
 }
 
@@ -47,10 +54,26 @@ template <
     int dst_n,
     typename src_t,
     int src_n,
+    bool keep = false,
     std::enable_if_t<dst_n == 1, int> = 0>
-inline Vectorized<dst_t> convert(const VectorizedN<src_t, src_n>& src) {
+inline std::conditional_t<keep, VectorizedN<dst_t, 1>, Vectorized<dst_t>>
+convert(const VectorizedN<src_t, src_n>& src) {
   return VecConvert<dst_t, dst_n, src_t, src_n>::apply(src);
 }
 
 } // namespace CPU_CAPABILITY
+
+template <
+    typename scalar_t,
+    typename std::enable_if_t<is_reduced_floating_point_v<scalar_t>, int> = 0>
+inline std::tuple<Vectorized<float>, Vectorized<float>> convert_to_float(
+    const Vectorized<scalar_t>&);
+
+template <
+    typename scalar_t,
+    typename std::enable_if_t<is_reduced_floating_point_v<scalar_t>, int> = 0>
+inline Vectorized<scalar_t> convert_from_float(
+    const Vectorized<float>&,
+    const Vectorized<float>&);
+
 } // namespace at::vec

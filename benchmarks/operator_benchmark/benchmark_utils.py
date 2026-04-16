@@ -37,7 +37,7 @@ def numpy_random(dtype, *shapes):
     Args:
         shapes: int or a sequence of ints to defining the shapes of the tensor
         dtype: use the dtypes from numpy
-            (https://docs.scipy.org/doc/numpy/user/basics.types.html)
+            (https://numpy.org/doc/stable/user/basics.types.html)
     Return:
         numpy tensor of dtype
     """
@@ -317,14 +317,6 @@ def op_list(**configs):
         }
         generated_configs.append(tmp_result)
     return generated_configs
-
-
-def is_caffe2_enabled(framework_arg):
-    return "Caffe2" in framework_arg
-
-
-def is_pytorch_enabled(framework_arg):
-    return "PyTorch" in framework_arg
 
 
 def get_operator_range(chars_range):

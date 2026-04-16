@@ -615,7 +615,7 @@ void spmm(
 
   // CUDA < 11.0 doesn't support 64-bit indices and doesn't raise an error about this
   // silently returning incorrect results
-#if defined(USE_ROCM)
+#if defined(USE_ROCM) && (ROCM_VERSION < 60300)
   auto mat1_32 = at::native::_sparse_csr_tensor_unsafe(
       mat1.crow_indices().to(kInt),
       mat1.col_indices().to(kInt),
@@ -626,11 +626,11 @@ void spmm(
       mat1.device());
   auto descA = at::cuda::sparse::CuSparseSpMatCsrDescriptor(mat1_32);
   auto algorithm = CUSPARSE_MM_ALG_DEFAULT;
-#else
+#else // defined(USE_ROCM) && (ROCM_VERSION < 60300)
   // TODO: update this to support COO sparse layout
   auto descA = at::cuda::sparse::CuSparseSpMatCsrDescriptor(mat1);
   auto algorithm = CUSPARSE_SPMM_CSR_ALG2;
-#endif
+#endif // defined(USE_ROCM) && (ROCM_VERSION < 60300)
 
   auto descB = at::cuda::sparse::CuSparseConstDnMatDescriptor(
       transpose_B ? mat2_->mT() : *mat2_);
@@ -692,13 +692,6 @@ void spgemm(
     const Scalar& beta,
     const Scalar& alpha,
     const at::sparse_csr::SparseCsrTensor& C) {
-#if defined(USE_ROCM) && ROCM_VERSION < 50200
-  TORCH_CHECK(
-      false,
-      "Calling addmm with sparse GPU tensors requires compiling ",
-      "PyTorch with ROCm 5.2+. ",
-      "Please use PyTorch built with newer ROCm version.");
-#else
   // older versions of cusparse on Windows segfault for complex128 dtype
 #if defined(_WIN32) && defined(CUSPARSE_VERSION) && CUSPARSE_VERSION < 11400
   TORCH_CHECK(
@@ -834,7 +827,6 @@ void spgemm(
             CUSPARSE_SPGEMM_DEFAULT,
             spgemm_desc.descriptor()));
       });
-#endif
 }
 
 } // anonymous namespace

@@ -1,13 +1,15 @@
+from __future__ import annotations
+
 import glob
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional, Union
+
 
 CPP_TEST_PREFIX = "cpp"
 CPP_TEST_PATH = "build/bin"
 CPP_TESTS_DIR = os.path.abspath(os.getenv("CPP_TESTS_DIR", default=CPP_TEST_PATH))
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def parse_test_module(test: str) -> str:
@@ -16,11 +18,11 @@ def parse_test_module(test: str) -> str:
 
 def discover_tests(
     base_dir: Path = REPO_ROOT / "test",
-    cpp_tests_dir: Optional[Union[str, Path]] = None,
-    blocklisted_patterns: Optional[List[str]] = None,
-    blocklisted_tests: Optional[List[str]] = None,
-    extra_tests: Optional[List[str]] = None,
-) -> List[str]:
+    cpp_tests_dir: str | Path | None = None,
+    blocklisted_patterns: list[str] | None = None,
+    blocklisted_tests: list[str] | None = None,
+    extra_tests: list[str] | None = None,
+) -> list[str]:
     """
     Searches for all python files starting with test_ excluding one specified by patterns.
     If cpp_tests_dir is provided, also scan for all C++ tests under that directory. They
@@ -102,7 +104,10 @@ TESTS = discover_tests(
         "distributed/test_c10d_spawn",
         "distributions/test_transforms",
         "distributions/test_utils",
+        "lazy/test_meta_kernel",
+        "lazy/test_extract_compiled_graph",
         "test/inductor/test_aot_inductor_utils",
+        "onnx/test_onnxscript_no_runtime",
         "onnx/test_pytorch_onnx_onnxruntime_cuda",
         "onnx/test_models",
         # These are not C++ tests
@@ -131,6 +136,8 @@ TESTS = discover_tests(
         "distributed/elastic/utils/distributed_test",
         "distributed/elastic/multiprocessing/api_test",
         "doctests",
+        "test_autoload_enable",
+        "test_autoload_disable",
     ],
 )
 

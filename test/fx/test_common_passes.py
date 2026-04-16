@@ -6,11 +6,10 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.graph_module import GraphModule
 from torch.fx.passes.dialect.common.cse_pass import CSEPass
-
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
-    run_tests,
+    raise_on_run_directly,
     TestCase,
 )
 
@@ -129,4 +128,4 @@ class TestCommonPass(TestCase):
 
 
 if __name__ == "__main__":
-    run_tests()
+    raise_on_run_directly("test/test_fx.py")

@@ -38,9 +38,8 @@ struct MTIAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   void setDevice(c10::Device d) const override {
-    c10::Device current_device = getDevice();
-    if (current_device.index() != d.index()) {
-      current_device = d;
+    if (getDevice().index() != d.index()) {
+      current_device = d.index();
     }
   }
   void uncheckedSetDevice(c10::Device d) const noexcept override {
@@ -126,7 +125,8 @@ struct MTIAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     (void)stream;
   }
 
-  double elapsedTime(void* event1, void* event2) const override {
+  double elapsedTime(void* event1, void* event2, const c10::DeviceIndex device_index) const override {
+    (void)device_index;
     uint64_t elapsed_time = 1e6;
     return (double)(elapsed_time / 1e6);
   }
@@ -138,7 +138,7 @@ struct MTIAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
 
 struct MTIAHooks : public at::MTIAHooksInterface {
   explicit MTIAHooks(at::MTIAHooksArgs) {}
-  void initMTIA() const override {}
+  void init() const override {}
 
   bool hasMTIA() const override {
     return true;

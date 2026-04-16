@@ -1,4 +1,5 @@
 # Owner(s): ["oncall: quantization"]
+# ruff: noqa: F841
 
 
 import copy
@@ -6,8 +7,9 @@ import itertools
 import numpy as np
 import operator
 import random
+import sys
 import unittest
-from typing import NamedTuple, List
+from typing import NamedTuple
 
 import torch
 from torch import _VF
@@ -21,8 +23,16 @@ from hypothesis import strategies as st
 import torch.testing._internal.hypothesis_utils as hu
 hu.assert_deadline_disabled()
 
-from torch.testing._internal.common_utils import TestCase
-from torch.testing._internal.common_utils import IS_PPC, TEST_WITH_UBSAN, IS_MACOS, BUILD_WITH_CAFFE2, IS_SANDCASTLE
+from torch.testing._internal.common_cuda import SM80OrLater
+from torch.testing._internal.common_utils import (
+    raise_on_run_directly,
+    TestCase,
+    IS_PPC,
+    IS_MACOS,
+    IS_SANDCASTLE,
+    IS_FBCODE,
+    IS_ARM64
+)
 from torch.testing._internal.common_quantization import skipIfNoFBGEMM, skipIfNoQNNPACK, skipIfNoONEDNN
 from torch.testing._internal.common_quantized import _quantize, _dequantize, _calculate_dynamic_qparams, \
     override_quantized_engine, supported_qengines, override_qengines, _snr
@@ -31,9 +41,11 @@ from torch.testing._internal.common_quantized import (
     qengine_is_onednn,
 )
 from torch.ao.quantization import PerChannelMinMaxObserver
-from torch.testing._internal.common_cuda import TEST_CUDNN, TEST_CUDA
+from torch.testing._internal.common_cuda import TEST_CUDNN, TEST_CUDNN_VERSION, TEST_CUDA
 from torch.testing._internal.optests import opcheck
 import torch.backends.xnnpack
+
+from torch.utils.cpp_extension import ROCM_HOME
 
 from typing import Optional
 
@@ -43,11 +55,13 @@ np_dtype = {
     torch.qint32 : np.int32
 }
 
+TEST_ROCM = TEST_CUDA and torch.version.hip is not None and ROCM_HOME is not None
+
 class PointwisePostOp(NamedTuple):
     binary_attr : str = "none"
     alpha : float = 1.0
     unary_attr : str = "none"
-    scalars : List = []
+    scalars : list = []
     algorithm : str = ""
 
 # Make sure we won't have overflows from vpmaddubsw instruction used in FBGEMM.
@@ -59,6 +73,8 @@ class PointwisePostOp(NamedTuple):
 def avoid_vpmaddubsw_overflow_linear(
     batch_size, input_channels, output_channels, X, X_min, X_max, W, W_min, W_max
 ):
+    if sys.version_info >= (3, 13):
+        raise unittest.SkipTest("numpy 2.1 overflow error")
     for i, j in np.ndindex((batch_size, output_channels)):
         for k in range(0, input_channels // 2 * 2, 2):
             x0 = X[i, k] - X_min
@@ -905,9 +921,9 @@ class TestQuantizedOps(TestCase):
     """Tests the correctness of the cudnn add and add_relu op
     (Similar to test_qadd_relu_different_qparams, will probably merge in the future)"""
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the test_qadd_relu_cudnn op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skip("not currently working and feature isn't used")
     def test_qadd_relu_cudnn(self):
         dtype = torch.qint8
         add_relu = torch.ops.quantized.add_relu
@@ -940,9 +956,9 @@ class TestQuantizedOps(TestCase):
 
     """Tests the correctness of the cudnn add and add_relu op for nhwc format"""
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the test_qadd_relu_cudnn_nhwc op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skip("not currently working and feature isn't used")
     def test_qadd_relu_cudnn_nhwc(self):
         dtype = torch.qint8
         add_relu = torch.ops.quantized.add_relu
@@ -1379,7 +1395,7 @@ class TestQuantizedOps(TestCase):
         self.assertEqual(a_ref, a_hat.dequantize(),
                          msg="ops.quantized.max_pool1d results are off")
 
-    # TODO: merge this test with test_max_pool2d when USE_EXPERIMENTAL_CUDNN_V8_API flag is enabled in CI
+    # TODO: merge this test with test_max_pool2d
     """Tests 2D cudnn max pool operation on quantized tensors."""
     @given(X=hu.tensor(shapes=hu.array_shapes(min_dims=3, max_dims=4,
                                               min_side=1, max_side=10),
@@ -1394,9 +1410,8 @@ class TestQuantizedOps(TestCase):
            padding=st.integers(0, 2),
            ceil_mode=st.booleans())
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the qconv2d_cudnn op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(TEST_CUDNN_VERSION <= 90100, "cuDNN maxpool2d mishandles -128 before v90100")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
     def test_max_pool2d_cudnn(self, X, kernel, stride, dilation, padding, ceil_mode):
         X, (scale, zero_point, torch_type) = X
         assume(kernel // 2 >= padding)  # Kernel cannot be overhanging!
@@ -1475,6 +1490,7 @@ class TestQuantizedOps(TestCase):
                          msg="ops.quantized.max_pool2d results are off")
 
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     def test_max_pool2d_pt2e(self):
         kernel_list = [2, 3]
         stride_list = [1, 2]
@@ -1901,8 +1917,8 @@ class TestQuantizedOps(TestCase):
             X = np.array(X)
             scale = 1
             H, W = X.shape[-2:]
-            output_size_h = output_size_h if (output_size_h <= H) else H
-            output_size_w = output_size_w if (output_size_w <= W) else W
+            output_size_h = min(output_size_h, H)
+            output_size_w = min(output_size_w, W)
             if output_size_h == output_size_w:
                 output_size = output_size_h
             else:
@@ -1949,6 +1965,7 @@ class TestQuantizedOps(TestCase):
                                  msg=error_message.format(name + '.zero_point', scale,
                                  X_hat.q_zero_point()))
 
+    @unittest.skip("not currently working and feature isn't used")
     def test_adaptive_avg_pool(self):
 
         side_lens = (range(1, 10))
@@ -1975,9 +1992,9 @@ class TestQuantizedOps(TestCase):
                 dim_to_check.append(3)
 
             D, H, W = X.shape[-3:]
-            output_size_d = output_size_d if (output_size_d <= D) else D
-            output_size_h = output_size_h if (output_size_h <= H) else H
-            output_size_w = output_size_w if (output_size_w <= W) else W
+            output_size_d = min(output_size_d, D)
+            output_size_h = min(output_size_h, H)
+            output_size_w = min(output_size_w, W)
 
             X = torch.from_numpy(X)
             qX = torch.quantize_per_tensor(X, scale=scale, zero_point=zero_point,
@@ -2047,9 +2064,9 @@ class TestQuantizedOps(TestCase):
             X = np.array(X)
             scale = 1
             D, H, W = X.shape[-3:]
-            output_size_d = output_size_d if (output_size_d <= D) else D
-            output_size_h = output_size_h if (output_size_h <= H) else H
-            output_size_w = output_size_w if (output_size_w <= W) else W
+            output_size_d = min(output_size_d, D)
+            output_size_h = min(output_size_h, H)
+            output_size_w = min(output_size_w, W)
             if output_size_d == output_size_h == output_size_w:
                 output_size = output_size_h
             else:
@@ -2911,6 +2928,11 @@ class TestQuantizedOps(TestCase):
 
     @override_qengines
     def test_custom_module_lstm(self):
+        class QuantizableLSTMSplitGates(torch.ao.nn.quantizable.LSTM):
+            @classmethod
+            def from_float(cls, other, qconfig=None):
+                return super().from_float(other, qconfig, split_gates=True)
+
         qengine = torch.backends.quantized.engine
 
         batch_size = 4
@@ -2925,6 +2947,7 @@ class TestQuantizedOps(TestCase):
         Bias = [False, True]
         Batch_first = [False, True]
         Bidirectional = [False, True]
+        Split_gates = [False, True]
 
         dtype = np.uint8
         qtype = torch.quint8
@@ -2937,8 +2960,8 @@ class TestQuantizedOps(TestCase):
         x = qx.dequantize()
 
         with torch.no_grad():
-            for bias, batch_first, bidirectional in itertools.product(
-                    Bias, Batch_first, Bidirectional):
+            for bias, batch_first, bidirectional, split_gates in itertools.product(
+                    Bias, Batch_first, Bidirectional, Split_gates):
                 # Assume 12dB is sufficient for functional equivalence
                 # Without the bias, linear performs poorly
                 min_power = 10 if bias else 5
@@ -2962,17 +2985,36 @@ class TestQuantizedOps(TestCase):
 
                 # Prepare
                 lstm.qconfig = torch.ao.quantization.get_default_qconfig(qengine)
-                lstm_prepared = torch.ao.quantization.prepare(lstm)
+                custom_config_dict = (
+                    None
+                    if not split_gates
+                    else {  # switch to class with split_gates True via from_float
+                        "float_to_observed_custom_module_class": {
+                            torch.nn.LSTM: QuantizableLSTMSplitGates
+                        },
+                        "observed_to_quantized_custom_module_class": {
+                            QuantizableLSTMSplitGates: torch.ao.nn.quantized.LSTM,
+                        },
+                    }
+                )
+                lstm_prepared = torch.ao.quantization.prepare(
+                    lstm, prepare_custom_config_dict=custom_config_dict
+                )
                 self.assertTrue(hasattr(lstm_prepared[0], 'layers'))
                 self.assertEqual(num_layers, len(lstm_prepared[0].layers))
-                assert type(lstm_prepared[0]) == torch.ao.nn.quantizable.LSTM
+                self.assertEqual(
+                    lstm_prepared[0].layers[0].layer_fw.cell.split_gates, split_gates
+                )
+                assert isinstance(lstm_prepared[0], torch.ao.nn.quantizable.LSTM)
 
                 # Calibrate
                 y = lstm_prepared(x)
                 self.assertEqual(y_ref, y)
 
                 # Quantize
-                lstm_quantized = torch.ao.quantization.convert(lstm_prepared)
+                lstm_quantized = torch.ao.quantization.convert(
+                    lstm_prepared, convert_custom_config_dict=custom_config_dict
+                )
                 assert type(lstm_quantized[0]) == torch.ao.nn.quantized.LSTM
                 qy = lstm_quantized(qx)
 
@@ -3103,6 +3145,105 @@ class TestQuantizedOps(TestCase):
 
                     # Verify the result is scriptable
                     mha_quantized_scripted = torch.jit.script(mha_quantized)
+
+    @skipIfNoONEDNN
+    def test_int8_mul_onednn(self):
+        output_dtype_list = [torch.uint8, torch.float, torch.bfloat16, torch.half]
+        shape_list = [(16, 64), (15, 63)]
+        cases = itertools.product(shape_list, output_dtype_list)
+        for shape, output_dtype in cases:
+            a = torch.randn(shape)
+            b = torch.randn(shape)
+            s_a, z_a = 0.1, 1
+            s_b, z_b = 0.2, 2
+            if output_dtype == torch.uint8:
+                s_c, z_c = 0.3, 3
+            else:
+                s_c, z_c = 1, 0
+            qa = torch.quantize_per_tensor(a, s_a, z_a, torch.quint8)
+            qb = torch.quantize_per_tensor(b, s_b, z_b, torch.quint8)
+            dqa = qa.dequantize()
+            dqb = qb.dequantize()
+            c_ref = dqa * dqb
+            if output_dtype == torch.uint8:
+                c_ref = torch.ops.quantized_decomposed.quantize_per_tensor.default(c_ref, s_c, z_c, 0, 255, torch.uint8)
+            c_ref = c_ref.to(output_dtype)
+
+            a_int8 = qa.int_repr()
+            b_int8 = qb.int_repr()
+            c = torch.ops.onednn.qmul.tensor(a_int8, s_a, z_a, b_int8, s_b, z_b, s_c, z_c, output_dtype)
+            self.assertEqual(c, c_ref)
+
+    @skipIfNoONEDNN
+    @given(relu_fused=st.booleans())
+    def test_int8_add_onednn(self, relu_fused):
+        output_dtype_list = [torch.uint8, torch.float, torch.bfloat16, torch.half]
+        shape_list = [(16, 64), (15, 63)]
+        cases = itertools.product(shape_list, output_dtype_list)
+        for shape, output_dtype in cases:
+            a = torch.randn(shape)
+            b = torch.randn(shape)
+            s_a, z_a = 0.1, 1
+            s_b, z_b = 0.2, 2
+            if output_dtype == torch.uint8:
+                s_c, z_c = 0.3, 3
+            else:
+                s_c, z_c = 1, 0
+            qa = torch.quantize_per_tensor(a, s_a, z_a, torch.quint8)
+            qb = torch.quantize_per_tensor(b, s_b, z_b, torch.quint8)
+            dqa = qa.dequantize()
+            dqb = qb.dequantize()
+            c_ref = dqa + dqb
+            if relu_fused:
+                c_ref = torch.nn.functional.relu(c_ref)
+            if output_dtype == torch.uint8:
+                c_ref = torch.ops.quantized_decomposed.quantize_per_tensor.default(c_ref, s_c, z_c, 0, 255, torch.uint8)
+            c_ref = c_ref.to(output_dtype)
+
+            a_int8 = qa.int_repr()
+            b_int8 = qb.int_repr()
+            if relu_fused:
+                c = torch.ops.onednn.qadd_relu.tensor(a_int8, s_a, z_a, b_int8, s_b, z_b, s_c, z_c, output_dtype)
+            else:
+                c = torch.ops.onednn.qadd.tensor(a_int8, s_a, z_a, b_int8, s_b, z_b, s_c, z_c, output_dtype)
+            self.assertEqual(c, c_ref)
+
+    @skipIfNoONEDNN
+    def test_int8_batch_norm_onednn(self):
+        # hypothesis too slow for this test, create test cases manually
+        channel_len_list = (8, 64, 100, 120, 128)
+        output_dtype_list = [torch.uint8, torch.float, torch.bfloat16, torch.half]
+        x_scale, x_zero_point = 0.1, 1
+        cases = itertools.product(channel_len_list, output_dtype_list)
+        for channels, out_dtype in cases:
+            shapes = [8, channels, 8, 8]
+            y_scale, y_zero_point = (0.2, 2) if out_dtype == torch.uint8 else (1, 0)
+
+            x = torch.randn(shapes, dtype=torch.float32)
+            mean = torch.rand(channels).float()
+            var = torch.rand(channels).float()
+            weight = torch.rand(channels).float()
+            bias = torch.rand(channels).float()
+            eps = 0.001
+            qx = torch.ops.quantized_decomposed.quantize_per_tensor.default(
+                x, x_scale, x_zero_point, 0, 255, torch.uint8
+            )
+            y = torch.ops.onednn.qbatch_norm2d(
+                qx, x_scale, x_zero_point, weight, bias, mean, var, eps, y_scale, y_zero_point, out_dtype
+            )
+
+            dqx = torch.ops.quantized_decomposed.dequantize_per_tensor.default(
+                qx, x_scale, x_zero_point, 0, 255, torch.uint8
+            )
+            y_ref = F.batch_norm(dqx, weight=weight, bias=bias,
+                                 running_mean=mean, running_var=var, training=False,
+                                 momentum=0, eps=eps)
+            if out_dtype == torch.uint8:
+                y_ref = torch.ops.quantized_decomposed.quantize_per_tensor.default(
+                    y_ref, y_scale, y_zero_point, 0, 255, torch.uint8
+                )
+            y_ref = y_ref.to(out_dtype)
+            self.assertEqual(y, y_ref, msg=f"{y} vs {y_ref}")
 
 
 class TestDynamicQuantizedOps(TestCase):
@@ -3663,7 +3804,7 @@ class TestDynamicQuantizedOps(TestCase):
         # The goal here is to show that the dynamic op is the same as
         # calc params->quantize_input->quantized op->dequantize output
 
-        if qengine_is_qnnpack() and (IS_PPC or TEST_WITH_UBSAN):
+        if qengine_is_qnnpack() and IS_PPC:
             return  # not supported by QNNPACK
 
         if qengine_is_qnnpack():
@@ -3744,6 +3885,39 @@ class TestDynamicQuantizedOps(TestCase):
             return  # TODO: fix MakeDeConvOutputShape overflowing for convT3d with qnnpack
         self._test_qconv_op_impl(q_mod, dq_op, dim, dtype)
 
+    @skipIfNoONEDNN
+    def test_linear_dynamic_fp16_onednn(self):
+
+        options = itertools.product(
+            (2, 4),         # batch_size
+            (4, 5, 12),     # input_channels
+            (4, 7, 8),      # output_channels
+            (True, False),  # use_bias
+            (True, False),  # use_relu
+        )
+        for batch_size, input_channels, output_channels, use_bias, use_relu in options:
+            qlinear_prepack = torch.ops.onednn.linear_prepack_fp16
+            if use_relu:
+                qlinear_dynamic = torch.ops.onednn.linear_relu_dynamic_fp16
+            else:
+                qlinear_dynamic = torch.ops.onednn.linear_dynamic_fp16
+
+            x = torch.randn(batch_size, input_channels)
+            w = torch.randn(output_channels, input_channels)
+            bias = torch.randn(output_channels) if use_bias else None
+
+            w_packed = qlinear_prepack(w, x.shape)
+            out = qlinear_dynamic(x, w_packed, bias)
+
+            # qlinear_dynamic_fp16 uses FP32 activation tensors and FP16 weight tensors
+            # output is FP32
+            w_fp16 = w.to(torch.float16).to(torch.float32)
+            ref = F.linear(x, w_fp16, bias)
+            if use_relu:
+                ref.relu_()
+
+            self.assertEqual(out, ref)
+
 
 class TestQuantizedLinear(TestCase):
     def _test_qlinear_impl(self, batch_size, input_channels, output_channels, use_bias,
@@ -3761,10 +3935,12 @@ class TestQuantizedLinear(TestCase):
             if torch.backends.xnnpack.enabled:
                 dtypes.append(torch.qint8)
 
+        if qengine_is_onednn() and IS_ARM64:
+            dtypes.append(torch.qint8)
+
         for dtype in dtypes:
             # No support for channelwise in xnnpack (int8)
-            # ONEDNN does not support qint8
-            if dtype == torch.qint8 and (use_channelwise or qengine_is_onednn()):
+            if dtype == torch.qint8 and use_channelwise:
                 return
 
             nptype = np_dtype[dtype]
@@ -3810,7 +3986,7 @@ class TestQuantizedLinear(TestCase):
                 np.random.rand(output_channels) *
                 (b_value_max - b_value_min) + b_value_min
             ).astype(np.int32) if use_bias else None
-            if torch.backends.quantized.engine in ('x86', 'fbgemm', 'onednn'):
+            if torch.backends.quantized.engine in ('x86', 'fbgemm', 'onednn') and not IS_ARM64:
                 avoid_vpmaddubsw_overflow_linear(
                     batch_size,
                     input_channels,
@@ -4050,10 +4226,11 @@ class TestQuantizedLinear(TestCase):
            use_channelwise=st.sampled_from([False]))  # channelwise currently not supported for qlinear cudnn
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the qlinear_cudnn op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(TEST_CUDNN and torch.backends.cudnn.version() == 90100, "expected failure on cuDNN 9.1.0")
+    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
     # TODO: check with yang regarding CUDNN flags
+    @unittest.skip("not currently working and feature isn't used")
     def test_qlinear_cudnn(self, batch_size, input_channels, output_channels, use_bias,
                            use_relu, use_multi_dim_input, use_channelwise):
         qlinear_prepack = torch.ops.quantized.linear_prepack
@@ -4177,6 +4354,87 @@ class TestQuantizedLinear(TestCase):
                 W_q.q_scale()), np.float32(W_q_origin.q_scale()))
             np.testing.assert_equal(
                 W_q.q_zero_point(), W_q_origin.q_zero_point())
+
+    """Tests the correctness of the _quantized::wrapped_quantized_linear op."""
+    @skipIfNoFBGEMM
+    @given(
+        m=st.integers(2, 6),
+        k=st.integers(2, 6),
+        n=st.integers(2, 6),
+    )
+    def test_wrapped_quantized_linear(self, m, n, k):
+        input = torch.randn(m, k, dtype=torch.float32)
+        input_scale = torch.tensor(0.1)
+        input_zero_point = torch.tensor(0)
+        weight = torch.randn(n, k, dtype=torch.float32)
+        weight_scale = torch.tensor(0.1)
+        weight_zero_point = torch.tensor(0)
+        bias = torch.randn(n, dtype=torch.float32)
+        output_scale = torch.tensor(0.1)
+        output_zero_point = torch.tensor(0)
+        out_channel = n
+
+        ret = torch.ops._quantized.wrapped_quantized_linear(
+            input,
+            input_scale,
+            input_zero_point,
+            weight,
+            weight_scale,
+            weight_zero_point,
+            bias,
+            output_scale,
+            output_zero_point,
+            out_channel,
+        )
+
+        qinput = torch.quantize_per_tensor(input, input_scale, input_zero_point, torch.quint8)
+        qweight = torch.quantize_per_tensor(weight, weight_scale, weight_zero_point, torch.qint8)
+        qlinear_prepack = torch.ops.quantized.linear_prepack(qweight, bias)
+        qlinear = torch.ops.quantized.linear(qinput, qlinear_prepack, output_scale, output_zero_point)
+        ret_ref = qlinear.dequantize()
+        self.assertEqual(ret, ret_ref)
+
+    """Tests the correctness of the _quantized::_wrapped_linear_prepack and
+    _quantized::_wrapped_quantized_linear_prepacked ops."""
+    @skipIfNoFBGEMM
+    @given(
+        m=st.integers(2, 6),
+        k=st.integers(2, 6),
+        n=st.integers(2, 6),
+    )
+    def test_wrapped_quantized_linear_prepacked(self, m, n, k):
+        input = torch.randn(m, k, dtype=torch.float32)
+        input_scale = torch.tensor(0.1)
+        input_zero_point = torch.tensor(0)
+        weight = torch.randn(n, k, dtype=torch.float32)
+        weight_scale = torch.tensor(0.1)
+        weight_zero_point = torch.tensor(0)
+        bias = torch.randn(n, dtype=torch.float32)
+        output_scale = torch.tensor(0.1)
+        output_zero_point = torch.tensor(0)
+        out_channel = n
+
+        ret_1 = torch.ops._quantized._wrapped_linear_prepack(
+            weight,
+            weight_scale,
+            weight_zero_point,
+            bias
+        )
+        ret_2 = torch.ops._quantized._wrapped_quantized_linear_prepacked(
+            input,
+            input_scale,
+            input_zero_point,
+            ret_1,
+            output_scale,
+            output_zero_point,
+            out_channel
+        )
+        qinput = torch.quantize_per_tensor(input, input_scale, input_zero_point, torch.quint8)
+        qweight = torch.quantize_per_tensor(weight, weight_scale, weight_zero_point, torch.qint8)
+        qlinear_prepack = torch.ops.quantized.linear_prepack(qweight, bias)
+        qlinear = torch.ops.quantized.linear(qinput, qlinear_prepack, output_scale, output_zero_point)
+        ret_ref = qlinear.dequantize()
+        self.assertEqual(ret_2, ret_ref)
 
     """Tests the correctness of the quantized::linear_unpack after freeing original tensor op."""
     @skipIfNoQNNPACK
@@ -4309,7 +4567,7 @@ class TestQuantizedLinear(TestCase):
                 if post_op in ("none", "relu", "gelu"):
                     qy_cpu = qlinear_op(
                         qx_cpu, x_scale, x_zp, qw_packed, w_scales, w_zps,
-                        b, 1.0 / used_y_scale, used_y_zp, output_dtype,
+                        b, used_y_scale, used_y_zp, output_dtype,
                         post_op, unary_post_op_args, post_op_algo
                     )
                     if post_op == "relu":
@@ -4330,8 +4588,8 @@ class TestQuantizedLinear(TestCase):
                         accum = accum.bfloat16()
                     qy_cpu = qlinear_op(
                         qx_cpu, x_scale, x_zp, qw_packed, w_scales, w_zps,
-                        b, 1.0 / used_y_scale, used_y_zp, output_dtype,
-                        accum, x2_scale, x2_zp, "sum", binary_alpha,
+                        accum, b, used_y_scale, used_y_zp, output_dtype,
+                        x2_scale, x2_zp, "sum", binary_alpha,
                         unary_post_op, unary_post_op_args, post_op_algo
                     )
                     y_ref = y_ref + x2 * binary_alpha
@@ -4348,8 +4606,8 @@ class TestQuantizedLinear(TestCase):
                     binary_alpha = 1.0  # we only support alpha=1.0 now
                     qy_cpu = qlinear_op(
                         qx_cpu, x_scale, x_zp, qw_packed, w_scales, w_zps,
-                        b, 1.0 / used_y_scale, used_y_zp, output_dtype,
-                        x2, 1.0, 0, "add", binary_alpha,
+                        x2, b, used_y_scale, used_y_zp, output_dtype,
+                        1.0, 0, "add", binary_alpha,
                         unary_post_op, unary_post_op_args, post_op_algo
                     )
                     y_ref = y_ref + x2 * binary_alpha
@@ -4377,37 +4635,44 @@ class TestQuantizedLinear(TestCase):
                     y_s: {y_scale}, y_zp: {y_zp}""",
                 )
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qlinear_pt2e(self):
         qlinear = torch.ops.onednn.qlinear_pointwise
         self._test_qlinear_pt2e_helper(qlinear, "none")
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qlinear_relu_pt2e(self):
         qlinear = torch.ops.onednn.qlinear_pointwise
         self._test_qlinear_pt2e_helper(qlinear, "relu")
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qlinear_gelu_pt2e(self):
         qlinear = torch.ops.onednn.qlinear_pointwise
         post_op_algorithms = ['none', 'tanh']
         self._test_qlinear_pt2e_helper(qlinear, "gelu", post_op_algorithms=post_op_algorithms)
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qlinear_sum_pt2e(self):
         qlinear = torch.ops.onednn.qlinear_pointwise.binary
         self._test_qlinear_pt2e_helper(qlinear, "sum")
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qlinear_sum_relu_pt2e(self):
         qlinear = torch.ops.onednn.qlinear_pointwise.binary
         self._test_qlinear_pt2e_helper(qlinear, "sum_relu")
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qlinear_add_pt2e(self):
         qlinear = torch.ops.onednn.qlinear_pointwise.binary
         self._test_qlinear_pt2e_helper(qlinear, "add")
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qlinear_add_relu_pt2e(self):
         qlinear = torch.ops.onednn.qlinear_pointwise.binary
@@ -4455,54 +4720,7 @@ class TestQuantizedEmbeddingOps(TestCase):
             self.assertEqual(unpacked_weight.q_per_channel_scales(), qweight.q_per_channel_scales())
             self.assertEqual(unpacked_weight.q_per_channel_zero_points(), qweight.q_per_channel_zero_points())
 
-        # compare against C2 to ensure numerical equivalency.
-        from caffe2.python import core, workspace
-        conversion_op = "FloatToFused8BitRowwiseQuantized" if data_type == torch.float32 else "HalfFloatToFused8BitRowwiseQuantized"
-        reverse_conversion_op = None
-        if bit_rate == 4:
-            conversion_op = "FloatToFused4BitRowwiseQuantized" if data_type == torch.float32 else "HalfToFused4BitRowwiseQuantized"
-            reverse_conversion_op = "Fused4BitRowwiseQuantizedToFloat"
-        elif bit_rate == 2:
-            conversion_op = "FloatToFused2BitRowwiseQuantized" if data_type == torch.float32 else "HalfToFused2BitRowwiseQuantized"
-            reverse_conversion_op = "Fused2BitRowwiseQuantizedToFloat"
 
-        def get_c2_weights(weights, engine_str):
-            workspace.ResetWorkspace()
-
-            workspace.FeedBlob("weights", weights)
-            workspace.RunOperatorOnce(
-                core.CreateOperator(
-                    conversion_op, ["weights"], ["quantized_weights"], engine=engine_str
-                )
-            )
-            emb_q = workspace.FetchBlob("quantized_weights")
-            if bit_rate == 4 or bit_rate == 2:
-                workspace.RunOperatorOnce(
-                    core.CreateOperator(
-                        reverse_conversion_op, ["quantized_weights"], ["dequantized_weights"]
-                    )
-                )
-                dequantized_data = torch.from_numpy(workspace.FetchBlob("dequantized_weights"))
-            else:
-                dequantized_data = torch.ops._caffe2.Fused8BitRowwiseQuantizedToFloat(
-                    torch.tensor(emb_q)
-                )
-            return torch.from_numpy(emb_q), dequantized_data
-
-        if optimized_qparams:
-            engine = "GREEDY"
-        else:
-            engine = ""
-
-        # C2 quantization needs the memory format of Tensor to be `continuous`, otherwise it will
-        # throw exceptions. torch.clone() will make the memory format to be `continuous`
-        c2_copy = torch.clone(weights)
-        w_packed_c2, w_unpacked_c2 = get_c2_weights(c2_copy, engine)
-
-        # Compare packed weights against C2.
-        np.testing.assert_allclose(w_packed.numpy(), w_packed_c2.numpy(), atol=1e-6, rtol=1e-6)
-        # Compare unpacked weights against C2
-        np.testing.assert_allclose(w_unpacked.numpy(), w_unpacked_c2.numpy(), atol=1e-6, rtol=1e-6)
 
 
     def _test_embedding_bag_unpack_fn(self, pack_fn, unpack_fn, num_embeddings, embedding_dim, bit_rate,
@@ -4521,47 +4739,6 @@ class TestQuantizedEmbeddingOps(TestCase):
         for weight in split_weights:
             self._test_embedding_bag_unpack_impl(pack_fn, unpack_fn, bit_rate, optimized_qparams, weight)
 
-
-    """ Tests the correctness of the embedding_bag_8bit pack/unpack op against C2 """
-    @unittest.skipIf(not BUILD_WITH_CAFFE2, "Test needs Caffe2")
-    @given(num_embeddings=st.integers(10, 100),
-           embedding_dim=st.integers(5, 50).filter(lambda x: x % 4 == 0),
-           num_batches=st.integers(1, 5),
-           data_type=st.sampled_from([np.float32, np.float16]),)
-    def test_embedding_bag_byte_unpack(self, num_embeddings, embedding_dim, num_batches, data_type):
-        pack_fn = torch.ops.quantized.embedding_bag_byte_prepack
-        unpack_fn = torch.ops.quantized.embedding_bag_byte_unpack
-
-        self._test_embedding_bag_unpack_fn(
-            pack_fn, unpack_fn, num_embeddings, embedding_dim, 8, False, num_batches, data_type=data_type)
-
-    """ Tests the correctness of the embedding_bag_4bit pack/unpack op against C2 """
-    @unittest.skipIf(not BUILD_WITH_CAFFE2, "Test needs Caffe2")
-    @given(num_embeddings=st.integers(10, 100),
-           embedding_dim=st.integers(5, 50).filter(lambda x: x % 4 == 0),
-           optimized_qparams=st.booleans(),
-           data_type=st.sampled_from([np.float32, np.float16]),)
-    def test_embedding_bag_4bit_unpack(self, num_embeddings, embedding_dim, optimized_qparams, data_type):
-        pack_fn = torch.ops.quantized.embedding_bag_4bit_prepack
-        unpack_fn = torch.ops.quantized.embedding_bag_4bit_unpack
-
-        # 4bit and 2bit quantization right now only works for 2D Tensor so we set the num_batches to 1
-        self._test_embedding_bag_unpack_fn(
-            pack_fn, unpack_fn, num_embeddings, embedding_dim, 4, optimized_qparams, 1, data_type=data_type)
-
-    """ Tests the correctness of the embedding_bag_2bit pack/unpack op against C2 """
-    @unittest.skipIf(not BUILD_WITH_CAFFE2, "Test needs Caffe2")
-    @given(num_embeddings=st.integers(10, 100),
-           embedding_dim=st.integers(5, 50).filter(lambda x: x % 8 == 0),
-           optimized_qparams=st.booleans(),
-           data_type=st.sampled_from([np.float32, np.float16]),)
-    def test_embedding_bag_2bit_unpack(self, num_embeddings, embedding_dim, optimized_qparams, data_type):
-        pack_fn = torch.ops.quantized.embedding_bag_2bit_prepack
-        unpack_fn = torch.ops.quantized.embedding_bag_2bit_unpack
-
-        # 4bit and 2bit quantization right now only works for 2D Tensor so we set the num_batches to 1
-        self._test_embedding_bag_unpack_fn(
-            pack_fn, unpack_fn, num_embeddings, embedding_dim, 2, optimized_qparams, 1, data_type=data_type)
 
 
     def embedding_bag_rowwise_offsets_run(
@@ -5101,7 +5278,7 @@ class TestQuantizedConv(TestCase):
         # Make sure the results match
         # assert_array_almost_equal compares using the following formula:
         #     abs(desired-actual) < 1.5 * 10**(-decimal)
-        # (https://docs.scipy.org/doc/numpy/reference/generated/numpy.testing.assert_almost_equal.html)
+        # (https://numpy.org/doc/stable/reference/generated/numpy.testing.assert_almost_equal.html)
         # We use decimal = 0 to ignore off-by-1 differences between
         # reference and test. Off-by-1 differences arise due to the order of
         # round and zero_point addition operation, i.e., if addition
@@ -5427,9 +5604,9 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the qconv2d_cudnn op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skip("not currently working and feature isn't used")
     def test_qconv2d_cudnn(
             self,
             batch_size,
@@ -5510,9 +5687,9 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the qconv2d_cudnn op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skip("not currently working and feature isn't used")
     def test_qconv2d_relu_cudnn(
             self,
             batch_size,
@@ -5649,7 +5826,7 @@ class TestQuantizedConv(TestCase):
     def test_qconv_transpose1d(self):
         if not qengine_is_qnnpack():
             return  # Currently only the QNNPACK is supported
-        if qengine_is_qnnpack() and (IS_PPC or TEST_WITH_UBSAN):
+        if qengine_is_qnnpack() and IS_PPC:
             return  # QNNPACK doesn't support these
         batch_size = 2
         input_channels_per_group_list = [2, 32]
@@ -5794,7 +5971,7 @@ class TestQuantizedConv(TestCase):
             Y_scale,
             Y_zero_point,
             use_bias):
-        if qengine_is_qnnpack() and (IS_PPC or TEST_WITH_UBSAN):
+        if qengine_is_qnnpack() and IS_PPC:
             return  # QNNPACK doesn't support these
         # ONEDNN does not support output paddings
         if qengine_is_onednn() and (o_pad_h, o_pad_w) != (0, 0):
@@ -6245,9 +6422,9 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the qconv1d_cudnn op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skip("not currently working and feature isn't used")
     def test_qconv1d_cudnn(
         self,
         batch_size,
@@ -6319,9 +6496,9 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skip("Local only - currently the qconv1d_cudnn op is bulid "
-                   "with USE_EXPERIMENTAL_CUDNN_V8_API, we can enable the test "
-                   "after it is built by default")
+    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
+    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skip("not currently working and feature isn't used")
     def test_qconv1d_relu_cudnn(
         self,
         batch_size,
@@ -6785,20 +6962,20 @@ class TestQuantizedConv(TestCase):
                 X_q_cpu_tensor,
                 X_scale,
                 X_zero_point,
-                X2_cpu_tensor,
-                X2_scale,
-                X2_zero_point,
                 packed_weight,
                 weight_scale,
                 weight_zero_point,
+                X2_cpu_tensor,
                 bias_float,
                 strides,
                 pads,
                 dilations,
                 groups,
-                1.0 / Y_scale,  # Kernel expects pass in reciprocal of scale in fake quant
+                Y_scale,
                 Y_zero_point,
                 qconv_output_dtype,
+                X2_scale,
+                X2_zero_point,
                 post_op.binary_attr,
                 post_op.alpha,
                 post_op.unary_attr,
@@ -6818,7 +6995,7 @@ class TestQuantizedConv(TestCase):
                 pads,
                 dilations,
                 groups,
-                1.0 / Y_scale,  # Kernel expects pass in reciprocal of scale in fake quant
+                Y_scale,
                 Y_zero_point,
                 qconv_output_dtype,
                 post_op.unary_attr,
@@ -6836,7 +7013,7 @@ class TestQuantizedConv(TestCase):
         # Make sure the results match
         # assert_array_almost_equal compares using the following formula:
         #     abs(desired-actual) < 1.5 * 10**(-decimal)
-        # (https://docs.scipy.org/doc/numpy/reference/generated/numpy.testing.assert_almost_equal.html)
+        # (https://numpy.org/doc/stable/reference/generated/numpy.testing.assert_almost_equal.html)
         # We use decimal = 0 to ignore off-by-1 differences between
         # reference and test. Off-by-1 differences arise due to the order of
         # round and zero_point addition operation, i.e., if addition
@@ -6858,6 +7035,7 @@ class TestQuantizedConv(TestCase):
         # Return the quantized data for later reuse
         return X_q, W_q, bias_float
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv1d_pt2e(self):
         groups_list = [1, 3]
@@ -6910,6 +7088,7 @@ class TestQuantizedConv(TestCase):
                 qconv_output_dtype=output_dtype,
             )
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv2d_pt2e(self):
         groups_list = [1, 3]
@@ -6937,7 +7116,7 @@ class TestQuantizedConv(TestCase):
             if (output_dtype is not None or channel_last_weight_format) and not (use_bias and use_channelwise):
                 # Remove some test combination to reduce UT test time
                 continue
-            qconv = torch.ops.onednn.qconv2d_pointwise
+            qconv = torch.ops.onednn.qconv_pointwise
             qconv_prepack = torch.ops.onednn.qconv_prepack
             conv_op = torch.nn.Conv2d(
                 input_channels_per_group * groups,
@@ -6970,6 +7149,7 @@ class TestQuantizedConv(TestCase):
                 weight_in_channel_last_format=channel_last_weight_format,
             )
 
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv3d_pt2e(self):
         input_channels_per_group = 2
@@ -7031,6 +7211,7 @@ class TestQuantizedConv(TestCase):
             )
 
     # Test qconv with post op relu
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv2d_relu_pt2e(self):
         input_channels_per_group = 2
@@ -7048,7 +7229,7 @@ class TestQuantizedConv(TestCase):
         output_dtype_list = [None, torch.float32, torch.bfloat16]
         options = itertools.product(groups_list, use_bias_list, use_channelwise_list, output_dtype_list)
         for groups, use_bias, use_channelwise, output_dtype in options:
-            qconv = torch.ops.onednn.qconv2d_pointwise
+            qconv = torch.ops.onednn.qconv_pointwise
             qconv_prepack = torch.ops.onednn.qconv_prepack
             conv_op = torch.nn.Conv2d(
                 input_channels_per_group * groups,
@@ -7081,6 +7262,7 @@ class TestQuantizedConv(TestCase):
             )
 
     # Test qconv with post op hardtanh
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv2d_hardtanh_pt2e(self):
         input_channels_per_group = 2
@@ -7098,7 +7280,7 @@ class TestQuantizedConv(TestCase):
         output_dtype_list = [None, torch.float32, torch.bfloat16]
         options = itertools.product(groups_list, use_bias_list, use_channelwise_list, output_dtype_list)
         for groups, use_bias, use_channelwise, output_dtype in options:
-            qconv = torch.ops.onednn.qconv2d_pointwise
+            qconv = torch.ops.onednn.qconv_pointwise
             qconv_prepack = torch.ops.onednn.qconv_prepack
             conv_op = torch.nn.Conv2d(
                 input_channels_per_group * groups,
@@ -7131,6 +7313,7 @@ class TestQuantizedConv(TestCase):
             )
 
     # Test qconv with post op silu
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv2d_silu_pt2e(self):
         input_channels_per_group = 2
@@ -7148,7 +7331,7 @@ class TestQuantizedConv(TestCase):
         output_dtype_list = [None, torch.float32, torch.bfloat16]
         options = itertools.product(groups_list, use_bias_list, use_channelwise_list, output_dtype_list)
         for groups, use_bias, use_channelwise, output_dtype in options:
-            qconv = torch.ops.onednn.qconv2d_pointwise
+            qconv = torch.ops.onednn.qconv_pointwise
             qconv_prepack = torch.ops.onednn.qconv_prepack
             conv_op = torch.nn.Conv2d(
                 input_channels_per_group * groups,
@@ -7180,58 +7363,60 @@ class TestQuantizedConv(TestCase):
                 qconv_output_dtype=output_dtype,
             )
 
-        # Test qconv with post op hardswish
-        @skipIfNoONEDNN
-        def test_qconv2d_hardswish_pt2e(self):
-            input_channels_per_group = 2
-            output_channels_per_group = 2
-            groups_list = [1, 10]
-            input_feature_map_shape = (10, 10)
-            kernels = (3, 3)
-            strides = (2, 2)
-            pads = (1, 1)
-            dilations = (1, 1)
-            W_scale = [1.5]
-            W_zero_point = [0]
-            use_bias_list = [False, True]
-            use_channelwise_list = [False, True]
-            output_dtype_list = [None, torch.float32, torch.bfloat16]
-            options = itertools.product(groups_list, use_bias_list, use_channelwise_list, output_dtype_list)
+    # Test qconv with post op hardswish
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
+    @skipIfNoONEDNN
+    def test_qconv2d_hardswish_pt2e(self):
+        input_channels_per_group = 2
+        output_channels_per_group = 2
+        groups_list = [1, 10]
+        input_feature_map_shape = (10, 10)
+        kernels = (3, 3)
+        strides = (2, 2)
+        pads = (1, 1)
+        dilations = (1, 1)
+        W_scale = [1.5]
+        W_zero_point = [0]
+        use_bias_list = [False, True]
+        use_channelwise_list = [False, True]
+        output_dtype_list = [None, torch.float32, torch.bfloat16]
+        options = itertools.product(groups_list, use_bias_list, use_channelwise_list, output_dtype_list)
 
-            for groups, use_bias, use_channelwise, output_dtype in options:
-                qconv = torch.ops.onednn.qconv2d_pointwise
-                qconv_prepack = torch.ops.onednn.qconv_prepack
-                conv_op = torch.nn.Conv2d(
-                    input_channels_per_group * groups,
-                    output_channels_per_group * groups,
-                    kernels,
-                    strides,
-                    pads,
-                    dilations,
-                    groups,
-                )
-                pointwise_post_op = PointwisePostOp(unary_attr="hardswish")
-                self._test_qconv_impl_cpu_tensor(
-                    qconv,
-                    qconv_prepack,
-                    conv_op,
-                    input_channels_per_group=input_channels_per_group,
-                    input_feature_map_shape=input_feature_map_shape,
-                    output_channels_per_group=output_channels_per_group,
-                    groups=groups,
-                    kernels=kernels,
-                    strides=strides,
-                    pads=pads,
-                    dilations=dilations,
-                    W_scale=W_scale,
-                    W_zero_point=W_zero_point,
-                    use_bias=use_bias,
-                    post_op=pointwise_post_op,
-                    use_channelwise=use_channelwise,
-                    qconv_output_dtype=output_dtype,
-                )
+        for groups, use_bias, use_channelwise, output_dtype in options:
+            qconv = torch.ops.onednn.qconv_pointwise
+            qconv_prepack = torch.ops.onednn.qconv_prepack
+            conv_op = torch.nn.Conv2d(
+                input_channels_per_group * groups,
+                output_channels_per_group * groups,
+                kernels,
+                strides,
+                pads,
+                dilations,
+                groups,
+            )
+            pointwise_post_op = PointwisePostOp(unary_attr="hardswish")
+            self._test_qconv_impl_cpu_tensor(
+                qconv,
+                qconv_prepack,
+                conv_op,
+                input_channels_per_group=input_channels_per_group,
+                input_feature_map_shape=input_feature_map_shape,
+                output_channels_per_group=output_channels_per_group,
+                groups=groups,
+                kernels=kernels,
+                strides=strides,
+                pads=pads,
+                dilations=dilations,
+                W_scale=W_scale,
+                W_zero_point=W_zero_point,
+                use_bias=use_bias,
+                post_op=pointwise_post_op,
+                use_channelwise=use_channelwise,
+                qconv_output_dtype=output_dtype,
+            )
 
     # Test qconv with post op sum
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv2d_sum_pt2e(self):
         groups_list = [1, 3]
@@ -7287,6 +7472,7 @@ class TestQuantizedConv(TestCase):
             )
 
     # Test qconv with post op sum relu
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv2d_sum_relu_pt2e(self):
         groups_list = [1, 3]
@@ -7339,6 +7525,7 @@ class TestQuantizedConv(TestCase):
             )
 
     # Test qconv with post op sum
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
     @skipIfNoONEDNN
     def test_qconv2d_sum_relu_float_output_pt2e(self):
         groups = 1
@@ -7398,6 +7585,58 @@ class TestQuantizedConv(TestCase):
                 qconv_output_dtype=output_dtype,
                 qconv_x2_dtype=qconv_x2_dtype,
             )
+
+    # Test qconv1d with post op relu
+    @unittest.skipIf(IS_FBCODE, "Skip pt2e ops in fbcode")
+    @skipIfNoONEDNN
+    def test_qconv1d_relu_pt2e(self):
+        input_channels_per_group = 2
+        output_channels_per_group = 2
+        groups_list = [1, 10]
+        input_feature_map_shape = (10,)
+        kernels = (3,)
+        strides = (2,)
+        pads = (1,)
+        dilations = (1,)
+        W_scale = [1.5]
+        W_zero_point = [0]
+        use_bias_list = [False, True]
+        use_channelwise_list = [False, True]
+        output_dtype_list = [None, torch.float32, torch.bfloat16]
+        options = itertools.product(groups_list, use_bias_list, use_channelwise_list, output_dtype_list)
+        for groups, use_bias, use_channelwise, output_dtype in options:
+            qconv = torch.ops.onednn.qconv_pointwise
+            qconv_prepack = torch.ops.onednn.qconv_prepack
+            conv_op = torch.nn.Conv1d(
+                input_channels_per_group * groups,
+                output_channels_per_group * groups,
+                kernels,
+                strides,
+                pads,
+                dilations,
+                groups,
+            )
+            pointwise_post_op = PointwisePostOp(unary_attr="relu")
+            self._test_qconv_impl_cpu_tensor(
+                qconv,
+                qconv_prepack,
+                conv_op,
+                input_channels_per_group=input_channels_per_group,
+                input_feature_map_shape=input_feature_map_shape,
+                output_channels_per_group=output_channels_per_group,
+                groups=groups,
+                kernels=kernels,
+                strides=strides,
+                pads=pads,
+                dilations=dilations,
+                W_scale=W_scale,
+                W_zero_point=W_zero_point,
+                use_bias=use_bias,
+                post_op=pointwise_post_op,
+                use_channelwise=use_channelwise,
+                qconv_output_dtype=output_dtype,
+            )
+
 
 class TestPadding(TestCase):
     @given(batch_size=st.integers(1, 64),
@@ -8033,3 +8272,6 @@ class TestComparatorOps(TestCase):
             note(f"result 3: {result}")
             self.assertEqual(result_ref, result,
                              msg=f"'tensor.{op}(scalar)'' failed")
+
+if __name__ == "__main__":
+    raise_on_run_directly("test/test_quantization.py")

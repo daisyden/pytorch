@@ -5,9 +5,10 @@ import sys
 from urllib.error import URLError
 from urllib.request import urlretrieve
 
+
 MIRRORS = [
     "http://yann.lecun.com/exdb/mnist/",
-    "https://ossci-datasets.s3.amazonaws.com/mnist/",
+    "https://ossci-datasets.s3.amazonaws.com/mnist/",  # @lint-ignore
 ]
 
 RESOURCES = [

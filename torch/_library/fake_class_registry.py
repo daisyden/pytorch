@@ -1,19 +1,51 @@
+# mypy: allow-untyped-defs
+import copy
 import logging
-from typing import Any, Dict, Optional, Protocol, Tuple
+from typing import Any, Optional, Protocol, Union
 
 import torch
-
 from torch._library.utils import parse_namespace
+from torch.utils._python_dispatch import _disable_current_modes
+
 
 log = logging.getLogger(__name__)
 
 
 class FakeScriptObject:
-    def __init__(self, wrapped_obj: Any, script_class_name: str):
+    def __init__(self, wrapped_obj: Any, script_class_name: str, x: torch.ScriptObject):
         self.wrapped_obj = wrapped_obj
 
         # The fully qualified name of the class of original script object
         self.script_class_name = script_class_name
+        try:
+            with _disable_current_modes():
+                self.real_obj = copy.deepcopy(x)
+        except RuntimeError:
+            log.warning(
+                "Unable to deepcopy the custom object %s. "
+                "Defaulting to the user given object. This might be "
+                "dangerous as side effects may be directly applied "
+                "to the object.",
+                script_class_name,
+            )
+            self.real_obj = x
+
+
+class FakeScriptMethod:
+    def __init__(
+        self,
+        self_fake_obj: FakeScriptObject,
+        method_name: str,
+        schema: Optional[torch.FunctionSchema],
+    ):
+        self.self_fake_obj = self_fake_obj
+        self.method_name = method_name
+        self.schema = schema
+
+    def __call__(self, *args, **kwargs):
+        from torch._higher_order_ops.torchbind import call_torchbind
+
+        return call_torchbind(self.self_fake_obj, self.method_name, *args, **kwargs)
 
 
 class HasStaticMethodFromReal(Protocol):
@@ -23,8 +55,8 @@ class HasStaticMethodFromReal(Protocol):
 
 
 class FakeClassRegistry:
-    def __init__(self):
-        self._registered_class: Dict[str, Any] = {}
+    def __init__(self) -> None:
+        self._registered_class: dict[str, Any] = {}
 
     def has_impl(self, full_qualname: str) -> bool:
         return full_qualname in self._registered_class
@@ -36,7 +68,7 @@ class FakeClassRegistry:
     def register(self, full_qualname: str, fake_class=None) -> None:
         if self.has_impl(full_qualname):
             log.warning(
-                "%s is already registered. Previous fake class is overrided with  %s.",
+                "%s is already registered. Previous fake class is overridden with  %s.",
                 full_qualname,
                 fake_class,
             )
@@ -65,31 +97,84 @@ class FakeClassRegistry:
 global_fake_class_registry = FakeClassRegistry()
 
 
-def to_fake_obj(fake_mode, x: torch.ScriptObject) -> FakeScriptObject:
-    fake_x = _fake_obj_from_real(fake_mode, x)
+# TODO: add this check at compile time for __obj_flatten__.
+def _check_valid_flat_script_obj(flat_x):
+    if not isinstance(flat_x, tuple):
+        raise RuntimeError("Expect flat x to be a tuple.")
 
-    def _call_torchbind(method_name):
-        from torch._higher_order_ops.torchbind import call_torchbind
+    for tp in flat_x:
+        if not isinstance(tp, tuple):
+            raise RuntimeError("Expect flat x to be a tuple of tuples.")
 
-        def wrapped(self_, *args, **kwargs):
-            return call_torchbind(self_, method_name, *args, **kwargs)
+        if not len(tp) == 2 or not isinstance(tp[0], str):
+            raise RuntimeError(
+                "Expect element of flat x to be a tuple of two elements with first element being a string"
+            )
 
-        return wrapped
 
-    fake_x_wrapped = FakeScriptObject(fake_x, x._type().qualified_name())  # type: ignore[attr-defined]
+def tracing_with_real(x: torch.ScriptObject) -> bool:
+    if not hasattr(x, "tracing_mode"):
+        return False
+
+    assert x.tracing_mode() in [
+        "real",
+        "fake",
+    ], f"tracing_mode can be either real or fake but got {x.tracing_mode()}"
+    return x.tracing_mode() == "real"
+
+
+def maybe_to_fake_obj(
+    fake_mode, x: torch.ScriptObject
+) -> Union[FakeScriptObject, torch.ScriptObject]:
+    import torch.utils._pytree as pytree
+    from torch.utils._python_dispatch import _disable_current_modes
+
+    # When tracing with real mode, people should implement meta kernels that can
+    # handle the case of real script object + fake tensor inputs.
+    if tracing_with_real(x):
+        return x
+
+    # x.__obj_flatten__() could be calling some tensor operations inside but we don't
+    # want to call these ops in surrounding dispatch modes when executing it.
+    # Otherwise, for example, the fake tensor modes will error out when the tensors inside
+    # script obeject execute some operations like clone if allow_non_fake_input flag is set.
+    with _disable_current_modes():
+        flat_x = x.__obj_flatten__()  # type: ignore[attr-defined]
+
+    _check_valid_flat_script_obj(flat_x)
+
+    fake_flattened = pytree.tree_map_only(
+        torch.Tensor,
+        lambda t: fake_mode.from_tensor(t),
+        flat_x,
+    )
+
+    fake_x = _find_fake_class_for_script_object(x).__obj_unflatten__(fake_flattened)
+
+    fake_x_wrapped = FakeScriptObject(fake_x, x._type().qualified_name(), x)  # type: ignore[attr-defined]
+
     for name in x._method_names():  # type: ignore[attr-defined]
         attr = getattr(fake_x, name, None)
-        if attr:
+        if attr is not None:
             if not callable(attr):
                 raise RuntimeError(f"Expect {name} to be a callable but got {attr}.")
+
+            real_attr = getattr(x, name)  # type: ignore[attr-defined]
+
+            # real attr sometimes is not torch.ScriptMethod thus doesn't have schema e.g. __init___ or __eq__
+            method_schema: Optional[torch.FunctionSchema] = None
+            if isinstance(real_attr, torch.ScriptMethod):
+                method_schema = real_attr.schema  # type: ignore[attr-defined]
 
             setattr(
                 fake_x_wrapped,
                 name,
-                _call_torchbind(name).__get__(fake_x_wrapped),
+                FakeScriptMethod(fake_x_wrapped, name, method_schema),
             )
         else:
-            log.warning("fake object of %s doesn't implement method %s.", x, name)
+            override_skip_list = {"__obj_flatten__", "__get_state__", "__set_state__"}
+            if name not in override_skip_list:
+                log.warning("fake object of %s doesn't implement method %s.", x, name)
     return fake_x_wrapped
 
 
@@ -107,8 +192,10 @@ def register_fake_class(qualname, fake_class: Optional[HasStaticMethodFromReal] 
     returns an instance of the fake class. All tensors in the fake object should also
     be properly fakified with to_fake_tensor() in from_real.
 
+
     Examples:
         # For a custom class Foo defined in test_custom_class_registration.cpp:
+
         TORCH_LIBRARY(_TorchScriptTesting, m) {
           m.class_<TensorQueue>("_TensorQueue")
             .def(torch::init<at::Tensor>())
@@ -117,6 +204,7 @@ def register_fake_class(qualname, fake_class: Optional[HasStaticMethodFromReal] 
             .def("top", &TensorQueue::top)
             .def("size", &TensorQueue::size)
             .def("clone_queue", &TensorQueue::clone_queue)
+            .def("__obj_flatten__", &TensorQueue::__obj_flatten__)
             .def_pickle(
                 // __getstate__
                 [](const c10::intrusive_ptr<TensorQueue>& self)
@@ -134,14 +222,12 @@ def register_fake_class(qualname, fake_class: Optional[HasStaticMethodFromReal] 
 
         @torch._library.register_fake_class("_TorchScriptTesting::_TensorQueue")
         class FakeTensorQueue:
-            def __init__(self, q):
-                self.queue = q
+            def __init__(self, queue):
+                self.queue = queue
 
             @classmethod
-            def from_real(cls, real_tq):
-                ctx = torch.library.get_ctx()
-                fake_queue = [ctx.to_fake_tensor(t) for t in real_tq.clone_queue()]
-                return cls(fake_queue)
+            def __obj_unflatten__(cls, flattened_ctx):
+                return cls(**dict(ctx))
 
             def push(self, x):
                 self.queue.append(x)
@@ -152,17 +238,24 @@ def register_fake_class(qualname, fake_class: Optional[HasStaticMethodFromReal] 
             def size(self):
                 return len(self.queue)
 
+    In this example, the original TensorQeue need to addd a __obj_flatten__ method
+    to the class TensorQueue and the flattend result is passed into FakeTensorQueue's
+    __obj_unflatten__ as inputs to create a fake class. This protocol allows pytorch to look
+    at the contents of the script object and properly handle them in the subsystems
+    like dynamo, aot_aotugrad or more.
     """
 
     def inner(fake_class: HasStaticMethodFromReal):
         ns, name = parse_namespace(qualname)
 
         # This also checks whether the refered torch::class_ exists.
-        torchbind_class = torch._C._get_custom_class_python_wrapper(ns, name)
+        torch._C._get_custom_class_python_wrapper(ns, name)
 
         from_method = getattr(fake_class, _CONVERT_FROM_REAL_NAME, None)
         if not from_method:
-            raise RuntimeError(f"{fake_class} doesn't define a classmethod from_real.")
+            raise RuntimeError(
+                f"{fake_class} doesn't define a classmethod {_CONVERT_FROM_REAL_NAME}."
+            )
 
         if not isinstance(fake_class.__dict__[_CONVERT_FROM_REAL_NAME], classmethod):
             raise RuntimeError(
@@ -196,11 +289,19 @@ def _full_qual_class_name(qualname: str) -> str:
     return "__torch__.torch.classes." + ns + "." + name
 
 
+def _is_script_object(obj: Any) -> bool:
+    return isinstance(
+        obj, torch.ScriptObject
+    ) and obj._type().qualified_name().startswith(  # type: ignore[attr-defined]
+        "__torch__.torch.classes"
+    )
+
+
 # Return the namespace and class name from fully qualified name.
-def _ns_and_class_name(full_qualname: str) -> Tuple[str, str]:
+def _ns_and_class_name(full_qualname: str) -> tuple[str, str]:
     splits = full_qualname.split(".")
-    assert len(splits) == 5
-    _torch, torch_ns, classes, ns, class_name = splits
+    assert len(splits) == 5, f"Could not split {full_qualname=}"
+    _torch, _torch_ns, _classes, ns, class_name = splits
     return ns, class_name
 
 
@@ -221,7 +322,7 @@ def _find_fake_class_for_script_object(x: torch.ScriptObject) -> Any:
     return fake_class
 
 
-_CONVERT_FROM_REAL_NAME = "from_real"
+_CONVERT_FROM_REAL_NAME = "__obj_unflatten__"
 
 
 def _fake_obj_from_real(fake_mode, x) -> Any:
@@ -235,6 +336,6 @@ def _fake_obj_from_real(fake_mode, x) -> Any:
         )
 
     # from_real defined by user need the ctx to fakify the tensor states.
-    ctx = torch._library.abstract_impl.AbstractImplCtx(fake_mode, None)
-    with torch._library.abstract_impl.set_ctx_getter(lambda: ctx):
+    ctx = torch._library.fake_impl.FakeImplCtx(fake_mode, None)
+    with torch._library.fake_impl.set_ctx_getter(lambda: ctx):
         return fake_class.from_real(x)

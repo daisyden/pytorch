@@ -3,6 +3,7 @@
 import unittest
 
 import sympy
+
 import torch
 from torch.fx import GraphModule, symbolic_trace
 from torch.fx.annotate import annotate
@@ -16,7 +17,7 @@ from torch.fx.experimental.rewriter import RewritingTracer
 from torch.fx.experimental.unify_refinements import infer_symbolic_types
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx.tensor_type import Dyn, is_consistent, is_more_precise, TensorType
-from torch.testing._internal.common_utils import TestCase
+from torch.testing._internal.common_utils import raise_on_run_directly, TestCase
 
 
 try:
@@ -671,7 +672,7 @@ class TypeCheckerTest(TestCase):
 
     def test_type_check_conv2D_maxpool2d_flatten(self):
         class BasicBlock(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
 
                 self.conv1 = torch.nn.Conv2d(3, 6, 5)
@@ -760,7 +761,7 @@ class TypeCheckerTest(TestCase):
 
     def test_type_typechecl_maxpool2d_3dinput(self):
         class BasicBlock(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.pool = torch.nn.MaxPool2d(5, 8)
 
@@ -912,7 +913,7 @@ class TypeCheckerTest(TestCase):
             (2, 2, 10, 10),
         ]
 
-        intermediate_list = [
+        intermediate_list = [  # noqa: F841
             Dyn,
             (2, 5, 6, 9),
             (10, 15, 13, 14),
@@ -1118,7 +1119,7 @@ class TypeCheckerTest(TestCase):
 
     def test_type_check_symbolic_inferenceconv2D_maxpool2d_flatten(self):
         class BasicBlock(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
 
                 self.conv1 = torch.nn.Conv2d(3, 6, 5)
@@ -1138,7 +1139,7 @@ class TypeCheckerTest(TestCase):
                 return out
 
         B = BasicBlock()
-        ast_rewriter = RewritingTracer()
+        ast_rewriter = RewritingTracer()  # noqa: F841
         traced = symbolic_trace(B)
         tc = GraphTypeChecker({}, traced)
         tc.type_check()
@@ -1167,4 +1168,4 @@ class TypeCheckerTest(TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    raise_on_run_directly("test/test_fx.py")

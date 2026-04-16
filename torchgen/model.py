@@ -1,12 +1,19 @@
+from __future__ import annotations
+
 import dataclasses
 import itertools
 import re
-
 from dataclasses import dataclass
 from enum import auto, Enum
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
+from typing import Callable, Optional, TYPE_CHECKING
+from typing_extensions import assert_never
 
-from torchgen.utils import assert_never, NamespaceHelper, OrderedSet
+from torchgen.utils import NamespaceHelper, OrderedSet
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ #
 #
@@ -229,7 +236,7 @@ class DispatchKey(Enum):
         return str(self).lower()
 
     @staticmethod
-    def parse(value: str) -> "DispatchKey":
+    def parse(value: str) -> DispatchKey:
         for k, v in DispatchKey.__members__.items():
             if k == value:
                 return v
@@ -243,10 +250,9 @@ class _TorchDispatchModeKey(Enum):
 
 
 def codegen_per_backend_entries() -> str:
-    r = []
+    r: list[str] = []
     for fk in FUNCTIONALITY_KEYS:
-        for bc in BACKEND_COMPONENTS:
-            r.append(f"    {fk}{bc} = auto()")
+        r.extend(f"    {fk}{bc} = auto()" for bc in BACKEND_COMPONENTS)
     return "\n".join(r)
 
 
@@ -260,7 +266,13 @@ for fk in FUNCTIONALITY_KEYS:
             )
 
 
-STRUCTURED_DISPATCH_KEYS = {DispatchKey.MPS, DispatchKey.CUDA, DispatchKey.CPU}
+STRUCTURED_DISPATCH_KEYS = {
+    DispatchKey.MPS,
+    DispatchKey.CUDA,
+    DispatchKey.CPU,
+    DispatchKey.XPU,
+    DispatchKey.MTIA,
+}
 UFUNC_DISPATCH_KEYS = {DispatchKey.CUDA, DispatchKey.CPU}
 
 # Set of supported dispatch keys
@@ -271,6 +283,9 @@ dispatch_keys = [
     DispatchKey.MkldnnCPU,
     DispatchKey.CUDA,
     DispatchKey.MPS,
+    DispatchKey.XPU,
+    DispatchKey.SparseXPU,
+    DispatchKey.SparseCsrXPU,
     DispatchKey.SparseCUDA,
     DispatchKey.SparseCsrCUDA,
     DispatchKey.QuantizedCPU,
@@ -281,6 +296,8 @@ dispatch_keys = [
     DispatchKey.CompositeExplicitAutogradNonFunctional,
     DispatchKey.NestedTensorCPU,
     DispatchKey.NestedTensorCUDA,
+    DispatchKey.NestedTensorXPU,
+    DispatchKey.NestedTensorHPU,
     # Meta is a magic key: it is automatically generated for structured
     # kernels
     DispatchKey.Meta,
@@ -289,6 +306,7 @@ dispatch_keys = [
     DispatchKey.QuantizedMeta,
     DispatchKey.NestedTensorMeta,
     DispatchKey.ZeroTensor,
+    DispatchKey.MTIA,
 ]
 
 
@@ -315,6 +333,18 @@ def is_cuda_dispatch_key(dk: DispatchKey) -> bool:
     }
 
 
+# XPU specific dispatcy keys
+def is_xpu_dispatch_key(dk: DispatchKey) -> bool:
+    return dk in {
+        DispatchKey.XPU,
+        DispatchKey.QuantizedXPU,
+        DispatchKey.SparseXPU,
+        DispatchKey.SparseCsrXPU,
+        DispatchKey.NestedTensorXPU,
+        DispatchKey.AutogradXPU,
+    }
+
+
 # Structured kernel generation is only supported for certain key types;
 # otherwise use old-style
 def is_structured_dispatch_key(dk: DispatchKey) -> bool:
@@ -324,6 +354,9 @@ def is_structured_dispatch_key(dk: DispatchKey) -> bool:
 def is_ufunc_dispatch_key(dk: DispatchKey) -> bool:
     # For now, ufunc dispatch keys coincide with structured keys
     return dk in UFUNC_DISPATCH_KEYS
+
+
+dispatch_device_map = {is_cuda_dispatch_key: "cuda", is_xpu_dispatch_key: "xpu"}
 
 
 # This is oddly named ScalarType and not DType for symmetry with C++
@@ -345,25 +378,26 @@ class ScalarType(Enum):
     Float8_e5m2fnuz = auto()
     Float8_e4m3fn = auto()
     Float8_e4m3fnuz = auto()
+    Float8_e8m0fnu = auto()
 
     def __str__(self) -> str:
         return self.name
 
     @staticmethod
-    def maybe_parse(value: str) -> Optional["ScalarType"]:
+    def maybe_parse(value: str) -> ScalarType | None:
         for k, v in ScalarType.__members__.items():
             if k == value:
                 return v
         return None
 
     @staticmethod
-    def parse(value: str) -> "ScalarType":
+    def parse(value: str) -> ScalarType:
         mb_r = ScalarType.maybe_parse(value)
         assert mb_r is not None, f"unknown dtype {value}"
         return mb_r
 
     @staticmethod
-    def parse_set(values: str) -> OrderedSet["ScalarType"]:
+    def parse_set(values: str) -> OrderedSet[ScalarType]:
         dtypes: OrderedSet[ScalarType] = OrderedSet()
         for value in values.split(", "):
             if value in DTYPE_CLASSES:
@@ -373,7 +407,7 @@ class ScalarType(Enum):
         return dtypes
 
 
-DTYPE_CLASSES: Dict[str, OrderedSet[ScalarType]] = {}
+DTYPE_CLASSES: dict[str, OrderedSet[ScalarType]] = {}
 # NB: Integral doesn't include boolean
 DTYPE_CLASSES["Integral"] = OrderedSet(
     [
@@ -419,7 +453,7 @@ class UfuncKey(Enum):
         return self.name
 
     @staticmethod
-    def parse(value: str) -> "UfuncKey":
+    def parse(value: str) -> UfuncKey:
         for k, v in UfuncKey.__members__.items():
             if k == value:
                 return v
@@ -462,7 +496,7 @@ class NativeFunction:
     # (This type is quoted as we are forward referencing a type
     # defined later in the file.  I opted for this ordering of the
     # classes for expository clarity.)
-    func: "FunctionSchema"
+    func: FunctionSchema
 
     # Whether or not to generate mutable tensor arguments like regular
     # ones
@@ -475,14 +509,14 @@ class NativeFunction:
     device_check: DeviceCheckType
 
     # What python module to put the function in
-    python_module: Optional[str]
+    python_module: str | None
 
     # TODO: figure out what this does
-    category_override: Optional[str]
+    category_override: str | None
 
     # If no variants are specified in native_functions.yaml, this is
     # assumed to be {'function'}.
-    variants: Set[Variant]
+    variants: set[Variant]
 
     # Whether or not we should skip generating registrations for
     # this kernel.  This is a bit of a double-edged sword, as manual
@@ -497,7 +531,7 @@ class NativeFunction:
 
     # The location in the YAML file were this native function entry was
     # defined.  This is for conveniently reporting error messages!
-    loc: "Location"
+    loc: Location
 
     # A list of operators that are expected to be auto-generated for this NativeFunction.
     # Note: This list isn't actually directly used by the codegen to generate anything.
@@ -505,11 +539,11 @@ class NativeFunction:
     # function schema, and uses the autogen declarations to error check.
     # We expect every NativeFunction that gets auto-generated be explicitly called out
     # in native_functions.yaml
-    autogen: List["OperatorName"]
+    autogen: list[OperatorName]
 
     # If non-empty, this kernel is subject to ufunc codegen.
     # Sorted by ufunc_key
-    ufunc_inner_loop: Dict[UfuncKey, "UfuncInnerLoop"]
+    ufunc_inner_loop: dict[UfuncKey, UfuncInnerLoop]
 
     # Whether or not this out functions is a "structured kernel".  Structured
     # kernels are defined a little differently from normal kernels; in
@@ -522,13 +556,13 @@ class NativeFunction:
 
     # Whether or not this non-out function is a structured kernel, defined
     # in terms of the out kernel referenced by the string here.
-    structured_delegate: Optional["OperatorName"]
+    structured_delegate: OperatorName | None
 
     # Only valid for structured kernels.  Specifies alternative of what
     # to inherit from when defining the meta class for the structured
     # operator.  This will usually be TensorIteratorBase.  This also
     # changes the semantics of set_output to call the parent class.
-    structured_inherits: Optional[str]
+    structured_inherits: str | None
 
     # Structured kernels can declare elements as "precomputed". These elements
     # are returned by the meta function in one struct and passed to the impl
@@ -536,11 +570,11 @@ class NativeFunction:
     # elements supersede. Information about the names and types of these
     # precomputed elements and how they correspond to kernel arguments is stored
     # in this member, if applicable.
-    precomputed: Optional["Precompute"]
+    precomputed: Precompute | None
 
     # Argument names whose default  should be excluded from the C++ interface.
     # Intended for resolving overload ambiguities between signatures.
-    cpp_no_default_args: Set[str]
+    cpp_no_default_args: set[str]
 
     # Note [Abstract ATen methods]
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -560,7 +594,7 @@ class NativeFunction:
 
     # Tags are used to describe semantic information about (groups of) operators,
     # That aren't easily inferrable directly from the operator's schema.
-    tags: Set[str]
+    tags: set[str]
 
     # NB: The benefit of defining a dataclass is that we automatically get
     # a constructor defined for all the fields we specify.  No need
@@ -569,13 +603,11 @@ class NativeFunction:
     # We parse both the NativeFunction + backend-specific information about it, which it stored in a corresponding BackendIndex.
     @staticmethod
     def from_yaml(
-        ei: Dict[str, object],
-        loc: "Location",
-        valid_tags: Set[str],
-        ignore_keys: Optional[Set[DispatchKey]] = None,
-    ) -> Tuple[
-        "NativeFunction", Dict[DispatchKey, Dict["OperatorName", "BackendMetadata"]]
-    ]:
+        ei: dict[str, object],
+        loc: Location,
+        valid_tags: set[str],
+        ignore_keys: set[DispatchKey] | None = None,
+    ) -> tuple[NativeFunction, dict[DispatchKey, dict[OperatorName, BackendMetadata]]]:
         """
         Parse a NativeFunction from a dictionary as directly parsed
         from native_functions.yaml
@@ -600,9 +632,14 @@ class NativeFunction:
         )
         assert isinstance(use_const_ref_for_mutable_tensors, bool)
 
+        if use_const_ref_for_mutable_tensors:
+            assert not func.arguments.out, (
+                "see https://github.com/pytorch/pytorch/issues/145522"
+            )
+
         variants_s = e.pop("variants", "function")
         assert isinstance(variants_s, str)
-        variants: Set[Variant] = set()
+        variants: set[Variant] = set()
         for v in variants_s.split(", "):
             if v == "function":
                 variants.add(Variant.function)
@@ -612,9 +649,9 @@ class NativeFunction:
                 raise AssertionError(f"illegal variant {v}")
 
         manual_kernel_registration = e.pop("manual_kernel_registration", False)
-        assert isinstance(
-            manual_kernel_registration, bool
-        ), f"not a bool: {manual_kernel_registration}"
+        assert isinstance(manual_kernel_registration, bool), (
+            f"not a bool: {manual_kernel_registration}"
+        )
 
         manual_cpp_binding = e.pop("manual_cpp_binding", False)
         assert isinstance(manual_cpp_binding, bool), f"not a bool: {manual_cpp_binding}"
@@ -623,9 +660,12 @@ class NativeFunction:
         assert isinstance(device_guard, bool), f"not a bool: {device_guard}"
 
         device_check_s = e.pop("device_check", None)
-        assert device_check_s is None or isinstance(
-            device_check_s, str
-        ), f"not a str: {device_check_s}"
+        assert device_check_s is None or isinstance(device_check_s, str), (
+            f"not a str: {device_check_s}"
+        )
+        assert (
+            device_check_s is None or device_check_s in DeviceCheckType.__members__
+        ), f"illegal device_check: {device_check_s}"
         device_check: DeviceCheckType
         if device_check_s is None:
             device_check = DeviceCheckType.ExactSame
@@ -643,31 +683,31 @@ class NativeFunction:
             "namespace is not supported in structured delegate,"
             " using the same namespace as the native function"
         )
-        structured_delegate: Optional[OperatorName] = None
+        structured_delegate: OperatorName | None = None
         if structured_delegate_s is not None:
             structured_delegate = OperatorName.parse(structured_delegate_s)
 
         structured_inherits = e.pop("structured_inherits", None)
-        assert structured_inherits is None or isinstance(
-            structured_inherits, str
-        ), f"not a str: {structured_inherits}"
+        assert structured_inherits is None or isinstance(structured_inherits, str), (
+            f"not a str: {structured_inherits}"
+        )
         assert structured_inherits is None or "::" not in structured_inherits, (
             "namespace is not supported in structured inherits,"
             " using the same namespace as the native function"
         )
 
         python_module = e.pop("python_module", None)
-        assert python_module is None or isinstance(
-            python_module, str
-        ), f"not a str: {python_module}"
-        assert (
-            python_module is None or Variant.method not in variants
-        ), "functions in modules cannot be methods"
+        assert python_module is None or isinstance(python_module, str), (
+            f"not a str: {python_module}"
+        )
+        assert python_module is None or Variant.method not in variants, (
+            "functions in modules cannot be methods"
+        )
 
         category_override = e.pop("category_override", None)
-        assert category_override is None or isinstance(
-            category_override, str
-        ), f"not a str: {category_override}"
+        assert category_override is None or isinstance(category_override, str), (
+            f"not a str: {category_override}"
+        )
 
         precomputed_dict = e.pop("precomputed", None)
         assert precomputed_dict is None or structured is True
@@ -682,7 +722,7 @@ class NativeFunction:
         if namespace == "aten" and "pt2_compliant_tag" in valid_tags:
             tags_inp.append("pt2_compliant_tag")
 
-        tags: Set[str] = set()
+        tags: set[str] = set()
         for t in tags_inp:
             assert len(valid_tags) > 0
             # TODO: verify that the tag is valid and has an entry in tags.yaml
@@ -695,7 +735,7 @@ class NativeFunction:
 
         raw_dispatch = e.pop("dispatch", None)
         assert raw_dispatch is None or isinstance(raw_dispatch, dict), e
-        dispatch: Dict[DispatchKey, BackendMetadata] = {}
+        dispatch: dict[DispatchKey, BackendMetadata] = {}
         num_dispatch_keys: int = 0
         if raw_dispatch is not None:
             assert not manual_kernel_registration, (
@@ -706,7 +746,12 @@ class NativeFunction:
             for ks, v in raw_dispatch.items():
                 if ks == "__line__":
                     continue  # not worth tracking line numbers for dispatch entries
-                assert isinstance(ks, str), e
+                assert isinstance(ks, str), (
+                    f"illegal dispatch key '{ks}' in {raw_dispatch}"
+                )
+                assert isinstance(v, str), (
+                    f"illegal dispatch value '{v}' in {raw_dispatch}"
+                )
                 for k in ks.split(","):
                     dispatch_key = DispatchKey.parse(k.strip())
                     num_dispatch_keys += 1
@@ -840,9 +885,9 @@ class NativeFunction:
             import torchgen.api.ufunc as ufunc
 
             for dispatch_key in UFUNC_DISPATCH_KEYS:
-                assert (
-                    dispatch_key not in dispatch
-                ), f"ufunc should not have explicit dispatch entry for {dispatch_key}"
+                assert dispatch_key not in dispatch, (
+                    f"ufunc should not have explicit dispatch entry for {dispatch_key}"
+                )
                 dispatch[dispatch_key] = BackendMetadata(
                     kernel=ufunc.schema_kernel_name(func, dispatch_key),
                     structured=True,
@@ -958,31 +1003,31 @@ class NativeFunction:
                 "Put structured field on the out= "
                 "variant of a function; did you mean structured_delegate?"
             )
-            assert (
-                self.device_guard
-            ), "device_guard: False is not respected by structured kernels"
+            assert self.device_guard, (
+                "device_guard: False is not respected by structured kernels"
+            )
         if self.structured_delegate:
             assert self.func.kind() != SchemaKind.out, (
                 "structured_delegate field not allowed "
                 "on out= functions; did you mean structured?"
             )
-            assert (
-                self.device_guard
-            ), "device_guard: False is not respected by structured kernels"
+            assert self.device_guard, (
+                "device_guard: False is not respected by structured kernels"
+            )
         # Technically, with the asserts above, this assert is impossible to
         # happen
-        assert not (
-            self.structured and self.structured_delegate
-        ), "Cannot have both structured and structured_delegate on function"
+        assert not (self.structured and self.structured_delegate), (
+            "Cannot have both structured and structured_delegate on function"
+        )
         defaulted_arguments = {
             a.name for a in self.func.schema_order_arguments() if a.default is not None
         }
         invalid_args = set.difference(self.cpp_no_default_args, defaulted_arguments)
         assert len(invalid_args) == 0, f"Invalid cpp_no_default_args: {invalid_args}"
         if self.structured_inherits is not None:
-            assert (
-                self.structured
-            ), "structured_inherits must also imply structured: True"
+            assert self.structured, (
+                "structured_inherits must also imply structured: True"
+            )
         if str(self.func.name).startswith("_foreach"):
             assert self.device_check == DeviceCheckType.NoCheck, (
                 "foreach kernels fall back to slow path when tensor are on different devices, "
@@ -1073,8 +1118,8 @@ class SchemaKind(Enum):
 @dataclass(frozen=True)
 class NativeFunctionsGroup:
     functional: NativeFunction
-    inplace: Optional[NativeFunction]
-    mutable: Optional[NativeFunction]
+    inplace: NativeFunction | None
+    mutable: NativeFunction | None
     out: NativeFunction
 
     @property
@@ -1128,7 +1173,7 @@ class NativeFunctionsGroup:
             [str(f.func.name) for f in self.functions() if "generated" in f.tags]
         )
         generated_fns_str = ", ".join(str(x) for x in generated_fns)
-        expected_generated_fns: Set[str] = set()
+        expected_generated_fns: set[str] = set()
         for f in self.functions():
             expected_generated_fns.update(str(op) for op in f.autogen)
         expected_generated_fns_str = ", ".join(
@@ -1147,7 +1192,7 @@ class NativeFunctionsGroup:
                 f" Instead, it found 'autogen: {expected_generated_fns_str}'"
             )
 
-    def signature(self) -> "FunctionSchema":
+    def signature(self) -> FunctionSchema:
         return self.out.func.signature()
 
     def functions(self) -> Iterator[NativeFunction]:
@@ -1163,9 +1208,7 @@ class NativeFunctionsGroup:
         return self.functional.root_name
 
     @staticmethod
-    def from_dict(
-        d: Dict[SchemaKind, NativeFunction]
-    ) -> Optional["NativeFunctionsGroup"]:
+    def from_dict(d: dict[SchemaKind, NativeFunction]) -> NativeFunctionsGroup | None:
         assert d
         if len(d) == 1:
             return None
@@ -1221,7 +1264,7 @@ class UfuncInnerLoop:
     ufunc_key: UfuncKey
 
     @staticmethod
-    def parse(value: str, ufunc_key: UfuncKey) -> "UfuncInnerLoop":
+    def parse(value: str, ufunc_key: UfuncKey) -> UfuncInnerLoop:
         name, supported_dtypes_str = value.split(" ", 1)
         assert supported_dtypes_str[0] == "("
         assert supported_dtypes_str[-1] == ")"
@@ -1253,18 +1296,18 @@ class BackendIndex:
     # Whether the backend is in-tree (CPU/CUDA) or out-of-tree (XLA)
     external: bool
     # Other backend-specific information that is on a per-operator basis
-    index: Dict["OperatorName", BackendMetadata]
+    index: dict[OperatorName, BackendMetadata]
 
     @staticmethod
     def grow_index(
-        parent_index: Dict[DispatchKey, Dict["OperatorName", BackendMetadata]],
-        child_index: Dict[DispatchKey, Dict["OperatorName", BackendMetadata]],
+        parent_index: dict[DispatchKey, dict[OperatorName, BackendMetadata]],
+        child_index: dict[DispatchKey, dict[OperatorName, BackendMetadata]],
     ) -> None:
         for k, v in child_index.items():
             for op_name, metadata in v.items():
-                assert (
-                    op_name not in parent_index[k]
-                ), f"duplicate operator {op_name} for dispatch key {k}"
+                assert op_name not in parent_index[k], (
+                    f"duplicate operator {op_name} for dispatch key {k}"
+                )
                 parent_index[k][op_name] = metadata
 
     def primary(self, g: NativeFunctionsGroup) -> NativeFunction:
@@ -1273,13 +1316,13 @@ class BackendIndex:
         else:
             return g.functional
 
-    def has_kernel(self, g: Union[NativeFunction, NativeFunctionsGroup]) -> bool:
+    def has_kernel(self, g: NativeFunction | NativeFunctionsGroup) -> bool:
         m = self.get_kernel(g)
         return m is not None
 
     def get_kernel(
-        self, g: Union[NativeFunction, NativeFunctionsGroup]
-    ) -> Optional[BackendMetadata]:
+        self, g: NativeFunction | NativeFunctionsGroup
+    ) -> BackendMetadata | None:
         if isinstance(g, NativeFunction):
             f = g
         elif isinstance(g, NativeFunctionsGroup):
@@ -1290,7 +1333,7 @@ class BackendIndex:
             return None
         return self.index[f.func.name]
 
-    def native_function_class_name(self) -> Optional[str]:
+    def native_function_class_name(self) -> str | None:
         if self.external:
             return f"{str(self.dispatch_key)}NativeFunctions"
         else:
@@ -1356,16 +1399,16 @@ class BackendIndex:
 @dataclass(frozen=True)
 class FunctionSchema:
     # The name of the operator this function schema describes.
-    name: "OperatorName"
+    name: OperatorName
 
-    arguments: "Arguments"
+    arguments: Arguments
 
     # TODO: Need to handle collisions with argument names at some point
-    returns: Tuple["Return", ...]
+    returns: tuple[Return, ...]
 
     @property
     def is_mutable(self) -> bool:
-        def is_write(arg: "Argument") -> bool:
+        def is_write(arg: Argument) -> bool:
             if arg.annotation is None:
                 return False
             return arg.annotation.is_write
@@ -1374,7 +1417,7 @@ class FunctionSchema:
         # See aten/src/ATen/core/function_schema.h (keep these in sync)
         return any(is_write(a) for a in self.arguments.flat_all)
 
-    def schema_order_arguments(self) -> Iterator["Argument"]:
+    def schema_order_arguments(self) -> Iterator[Argument]:
         return itertools.chain(
             self.arguments.flat_positional,
             self.arguments.flat_kwarg_only,
@@ -1384,7 +1427,7 @@ class FunctionSchema:
     decl_re = re.compile(r"(?P<name>[^\(]+)\((?P<args>.*)\) -> (?P<returns>.*)")
 
     @staticmethod
-    def parse(func: str) -> "FunctionSchema":
+    def parse(func: str) -> FunctionSchema:
         # We should probably get a proper parser here
         decls = FunctionSchema.decl_re.findall(func)
         assert len(decls) == 1, f"Invalid function schema: {func}"
@@ -1413,9 +1456,9 @@ class FunctionSchema:
         # We also enforce that if you have any mutable, positional args, then they are not returned.
         # This makes it easier to group these functions properly with their functional/out= counterparts.
         for a in self.arguments.post_self_positional_mutable:
-            assert not any(
-                a.annotation == r.annotation for r in self.returns
-            ), f"If you have a schema with mutable positional args, we expect them to not be returned. schema: {str(self)}"
+            assert not any(a.annotation == r.annotation for r in self.returns), (
+                f"If you have a schema with mutable positional args, we expect them to not be returned. schema: {str(self)}"
+            )
         # Invariant: we expect out arguments to appear as keyword arguments in the schema.
         # This means that all mutable returns should be aliased to a keyword argument
         # (except for "self", which we explicitly don't treat as an out argument because of its use in methods)
@@ -1438,9 +1481,9 @@ class FunctionSchema:
         # (1) It's more annoying to handle properly
         # (2) It's unnecessary - you can't method-chain on the first (mutated) output because it's part of a tuple.
         # Instead, we expect the (a!) argument to not be returned.
-        assert (
-            len(mutable_returns) == 0 or len(immutable_returns) == 0
-        ), f"NativeFunctions must have either only mutable returns, or only immutable returns. Found: {str(self)}"
+        assert len(mutable_returns) == 0 or len(immutable_returns) == 0, (
+            f"NativeFunctions must have either only mutable returns, or only immutable returns. Found: {str(self)}"
+        )
         for ret in mutable_returns:
             assert any(ret.annotation == arg.annotation for arg in out_and_self), (
                 'All mutable returns must be aliased either to a keyword argument, or to "self". '
@@ -1453,9 +1496,9 @@ class FunctionSchema:
             # and all other types of out= op schemas should return void.
             # There are a bunch of existing out= ops that return tuples of tensors though, so we're stuck with allowing that.
             if any(a.type != BaseType(BaseTy.Tensor) for a in self.arguments.out):
-                assert (
-                    len(self.returns) == 0
-                ), "out= ops that accept tensor lists as out arguments "
+                assert len(self.returns) == 0, (
+                    "out= ops that accept tensor lists as out arguments "
+                )
                 "are expected to have no return type (since you can't do method chaining on them)"
             else:
                 # mutable keyword arguments whose name has _scratch_ prefix are
@@ -1466,9 +1509,9 @@ class FunctionSchema:
                         for arg in self.arguments.out
                         if not arg.name.startswith("_scratch_")
                     ]
-                ) == len(
-                    self.returns
-                ), "Must return as many arguments as there are out arguments, or no return at all"
+                ) == len(self.returns), (
+                    "Must return as many arguments as there are out arguments, or no return at all"
+                )
 
         if self.name.name.inplace:
             self_a = self.arguments.self_arg
@@ -1485,7 +1528,7 @@ class FunctionSchema:
                     and self.returns[0].annotation == self_a.argument.annotation
                 )
             else:
-                # You can't method chain on non-tensor self arguments though (like a List[Tensor])
+                # You can't method chain on non-tensor self arguments though (like a list[Tensor])
                 # so in all other cases we expect the return type to be none.
                 assert len(self.returns) == 0
 
@@ -1561,14 +1604,14 @@ class FunctionSchema:
         if is_inplace:
             return SchemaKind.inplace
         elif is_scratch:
-            assert (
-                is_out
-            ), "invariant: all scratch operators are expected to be out= operators too"
+            assert is_out, (
+                "invariant: all scratch operators are expected to be out= operators too"
+            )
             return SchemaKind.scratch
         elif is_out:
-            assert (
-                not is_scratch
-            ), "We should not categorize a scratch op as an out variant. Check if the order of if statements are expected!"
+            assert not is_scratch, (
+                "We should not categorize a scratch op as an out variant. Check if the order of if statements are expected!"
+            )  # noqa: B950
             return SchemaKind.out
         elif is_mutable:
             return SchemaKind.mutable
@@ -1579,8 +1622,8 @@ class FunctionSchema:
     # - If the return aliases an input, we return the input name
     # - Otherwise, we return None.
     # If return names were enforced to be consistent with aliasing information, then we wouldn't need this.
-    def aliased_return_names(self) -> List[Optional[str]]:
-        outs: List[Optional[str]] = []
+    def aliased_return_names(self) -> list[str | None]:
+        outs: list[str | None] = []
         for r in self.returns:
             aliased_args = [
                 a
@@ -1604,7 +1647,7 @@ class FunctionSchema:
         strip_default: bool = False,
         strip_view_copy_name: bool = False,
         keep_return_names: bool = False,
-    ) -> "FunctionSchema":
+    ) -> FunctionSchema:
         """
                 Certain schemas are 'related', in that they are simply
                 inplace/out/functional versions of the same function.  This method
@@ -1669,9 +1712,11 @@ class FunctionSchema:
             for a in itertools.chain(
                 # Order is important here (otherwise e.g. inplace with mutable args
                 # and out= with mutable args won't have the same signature)
-                [self.arguments.self_arg.argument]
-                if self.arguments.self_arg is not None
-                else [],
+                (
+                    [self.arguments.self_arg.argument]
+                    if self.arguments.self_arg is not None
+                    else []
+                ),
                 self.arguments.out,
                 self.arguments.post_self_positional,
             )
@@ -1701,10 +1746,10 @@ class FunctionSchema:
             returns=returns,
         )
 
-    def view_signature(self) -> "FunctionSchema":
+    def view_signature(self) -> FunctionSchema:
         return self.signature(strip_view_copy_name=True)
 
-    def with_name(self, name: "OperatorName") -> "FunctionSchema":
+    def with_name(self, name: OperatorName) -> FunctionSchema:
         return FunctionSchema(
             name=name,
             arguments=self.arguments,
@@ -1739,12 +1784,12 @@ class FunctionSchema:
 class Annotation:
     # Typically only has one element.  Not actually a set so
     # we can conveniently assume it is canonically ordered
-    alias_set: Tuple[str, ...]
+    alias_set: tuple[str, ...]
     is_write: bool
-    alias_set_after: Tuple[str, ...]
+    alias_set_after: tuple[str, ...]
 
     @staticmethod
-    def parse(ann: str) -> "Annotation":
+    def parse(ann: str) -> Annotation:
         # TODO: implement a proper parser if this gets more ugly
         # Regex Explanation:
         # Example: "a! -> a|b"
@@ -1765,13 +1810,13 @@ class Annotation:
         before_alias = m.group(1) + (m.group(2) if m.group(2) else "")
         alias_set = tuple(before_alias.split("|"))
         is_write = m.group(3) == "!"
-        assert not (
-            is_write and len(alias_set) > 1
-        ), f"alias set larger than 1 is not mutable, got {ann} instead."
-        after_set = tuple(m.group(5).split("|")) if m.group(5) else tuple()
-        assert not (
-            len(before_alias) > 1 and len(after_set) > 1
-        ), f"before alias set and after alias set cannot be larger than 1 at the same time, got {ann} instead."
+        assert not (is_write and len(alias_set) > 1), (
+            f"alias set larger than 1 is not mutable, got {ann} instead."
+        )
+        after_set = tuple(m.group(5).split("|")) if m.group(5) else ()
+        assert not (len(before_alias) > 1 and len(after_set) > 1), (
+            f"before alias set and after alias set cannot be larger than 1 at the same time, got {ann} instead."
+        )
         r = Annotation(
             alias_set=alias_set, is_write=is_write, alias_set_after=after_set
         )
@@ -1784,7 +1829,7 @@ class Annotation:
             alias_set = f"{alias_set}!"
         alias_set_after = "|".join(self.alias_set_after)
         if alias_set_after:
-            alias_set = f'{alias_set}{" -> "}{alias_set_after}'
+            alias_set = f"{alias_set} -> {alias_set_after}"
         return alias_set
 
 
@@ -1797,13 +1842,13 @@ class Annotation:
 @dataclass(frozen=True)
 class Type:
     @staticmethod
-    def parse(t: str) -> "Type":
+    def parse(t: str) -> Type:
         r = Type._parse(t)
         assert str(r) == t, f"{r} != {t}"
         return r
 
     @staticmethod
-    def _parse(t: str) -> "Type":
+    def _parse(t: str) -> Type:
         m = re.match(r"^(.+)\?$", t)
         if m is not None:
             return OptionalType(Type.parse(m.group(1)))
@@ -1829,7 +1874,7 @@ class Type:
     # so we can conveniently generate legacy Declarations.yaml but
     # really we should probably just remove these at some point
 
-    def is_base_ty_like(self, base_ty: "BaseTy") -> bool:
+    def is_base_ty_like(self, base_ty: BaseTy) -> bool:
         raise NotImplementedError
 
     def is_tensor_like(self) -> bool:
@@ -1844,7 +1889,7 @@ class Type:
     def is_nullable(self) -> bool:
         raise NotImplementedError
 
-    def is_list_like(self) -> Optional["ListType"]:
+    def is_list_like(self) -> ListType | None:
         raise NotImplementedError
 
 
@@ -1868,7 +1913,8 @@ class BaseTy(Enum):
     Storage = auto()
     Stream = auto()
     SymInt = auto()
-    ConstQuantizerPtr = auto()  # TODO: rename
+    SymBool = auto()
+    GraphModule = auto()
 
 
 @dataclass(frozen=True)
@@ -1884,7 +1930,7 @@ class BaseType(Type):
     def is_nullable(self) -> bool:
         return False
 
-    def is_list_like(self) -> Optional["ListType"]:
+    def is_list_like(self) -> ListType | None:
         return None
 
     def is_symint_like(self) -> bool:
@@ -1908,7 +1954,7 @@ class OptionalType(Type):
     def is_nullable(self) -> bool:
         return True
 
-    def is_list_like(self) -> Optional["ListType"]:
+    def is_list_like(self) -> ListType | None:
         return self.elem.is_list_like()
 
 
@@ -1935,7 +1981,7 @@ class CustomClassType(Type):
         """
         return False
 
-    def is_list_like(self) -> Optional["ListType"]:
+    def is_list_like(self) -> ListType | None:
         return None
 
 
@@ -1949,7 +1995,7 @@ class CustomClassType(Type):
 @dataclass(frozen=True)
 class ListType(Type):
     elem: Type
-    size: Optional[int]
+    size: int | None
 
     def __str__(self) -> str:
         size = f"{self.size}" if self.size else ""
@@ -1964,7 +2010,7 @@ class ListType(Type):
     def is_nullable(self) -> bool:
         return self.elem.is_nullable()
 
-    def is_list_like(self) -> Optional["ListType"]:
+    def is_list_like(self) -> ListType | None:
         return self
 
 
@@ -1975,7 +2021,7 @@ class Argument:
 
     name: str
     type: Type
-    default: Optional[str]
+    default: str | None
 
     # The semantics of the annotation field are a little strange.
     #
@@ -1996,25 +2042,29 @@ class Argument:
     # structure of annotated types is very simple.  So we just hard
     # code it here.  But if we ever do get anything more complex, this
     # model will have to change!
-    annotation: Optional[Annotation]
+    annotation: Annotation | None
 
     @property
-    def alias_info(self) -> Optional[Annotation]:
+    def alias_info(self) -> Annotation | None:
         return self.annotation
 
     @staticmethod
-    def parse(arg: str) -> "Argument":
+    def parse(arg: str) -> Argument:
         name: str
-        default: Optional[str]
-        type_and_annot, name_and_default = arg.rsplit(" ", 1)
-        if "=" in name_and_default:
-            name, default = name_and_default.split("=")
+        default: str | None
+        assert " " in arg, f"illegal argument '{arg}'"
+        if "=" in arg:
+            assert arg.count("=") == 1, f"illegal argument with default value: '{arg}'"
+            type_and_annot_and_name, default = arg.split("=")
+            type_and_annot, name = type_and_annot_and_name.rsplit(" ", 1)
+            name_and_default = f"{name}={default}"
         else:
+            type_and_annot, name_and_default = arg.rsplit(" ", 1)
             name = name_and_default
             default = None
         # TODO: deduplicate annotation matching with Return
         match = re.match(r"Tensor\((.+)\)(.*)", type_and_annot)
-        annotation: Optional[Annotation]
+        annotation: Annotation | None
         if match:
             # If you update this, make sure the __str__ still works too
             assert match.group(2) in [
@@ -2057,24 +2107,24 @@ class Argument:
 
 @dataclass(frozen=True)
 class Return:
-    name: Optional[str]
+    name: str | None
     type: Type
-    annotation: Optional[Annotation]
+    annotation: Annotation | None
 
     @property
-    def alias_info(self) -> Optional[Annotation]:
+    def alias_info(self) -> Annotation | None:
         return self.annotation
 
     @staticmethod
-    def parse(arg: str) -> "Return":
-        name: Optional[str]
+    def parse(arg: str) -> Return:
+        name: str | None
         if " " in arg:
             type_and_annot, name = arg.rsplit(" ", 1)
         else:
             type_and_annot = arg
             name = None
         match = re.match(r"Tensor\((.+)\)(.*)", type_and_annot)
-        annotation: Optional[Annotation]
+        annotation: Annotation | None
         if match:
             # If you update this, make sure the __str__ still works too
             assert match.group(2) in [
@@ -2136,34 +2186,34 @@ class Arguments:
     # pre_self_positional is usually empty, but is notably non-empty
     # for where.self, where the condition argument comes before the
     # self argument
-    pre_self_positional: Tuple[Argument, ...]
-    self_arg: Optional[SelfArgument]
-    post_self_positional: Tuple[Argument, ...]
+    pre_self_positional: tuple[Argument, ...]
+    self_arg: SelfArgument | None
+    post_self_positional: tuple[Argument, ...]
 
-    pre_tensor_options_kwarg_only: Tuple[Argument, ...]
-    tensor_options: Optional[TensorOptionsArguments]
+    pre_tensor_options_kwarg_only: tuple[Argument, ...]
+    tensor_options: TensorOptionsArguments | None
     # post_tensor_options is typically memory format, which should be
     # part of tensor options but isn't right now, and is usually
     # placed after the tensor options arguments
-    post_tensor_options_kwarg_only: Tuple[Argument, ...]
+    post_tensor_options_kwarg_only: tuple[Argument, ...]
 
     # Unlike in the previous codegen, we have factored out 'out' arguments
     # in the canonical representation, removing them from kwarg
     # arguments.  This choice is justified by numerous downstream
     # transformations which treat out arguments specially; additionally,
     # you can see that canonicity is not violated!
-    out: Tuple[Argument, ...]  # these are also kwarg-only
+    out: tuple[Argument, ...]  # these are also kwarg-only
 
     @property
     def flat_non_out(self) -> Sequence[Argument]:
-        ret: List[Argument] = []
+        ret: list[Argument] = []
         ret.extend(self.flat_positional)
         ret.extend(self.flat_kwarg_only)
         return ret
 
     @property
     def flat_positional(self) -> Sequence[Argument]:
-        ret: List[Argument] = []
+        ret: list[Argument] = []
         ret.extend(self.pre_self_positional)
         if self.self_arg is not None:
             ret.append(self.self_arg.argument)
@@ -2177,7 +2227,7 @@ class Arguments:
     # NB: doesn't contain out arguments
     @property
     def flat_kwarg_only(self) -> Sequence[Argument]:
-        ret: List[Argument] = []
+        ret: list[Argument] = []
         ret.extend(self.pre_tensor_options_kwarg_only)
         if self.tensor_options is not None:
             ret.extend(self.tensor_options.all())
@@ -2186,7 +2236,7 @@ class Arguments:
 
     @property
     def flat_all(self) -> Sequence[Argument]:
-        ret: List[Argument] = []
+        ret: list[Argument] = []
         ret.extend(self.flat_positional)
         ret.extend(self.flat_kwarg_only)
         ret.extend(self.out)
@@ -2195,15 +2245,15 @@ class Arguments:
     @property
     def non_out(
         self,
-    ) -> Sequence[Union[Argument, SelfArgument, TensorOptionsArguments]]:
-        ret: List[Union[Argument, SelfArgument, TensorOptionsArguments]] = []
+    ) -> Sequence[Argument | SelfArgument | TensorOptionsArguments]:
+        ret: list[Argument | SelfArgument | TensorOptionsArguments] = []
         ret.extend(self.positional)
         ret.extend(self.kwarg_only)
         return ret
 
     @property
-    def positional(self) -> Sequence[Union[Argument, SelfArgument]]:
-        ret: List[Union[Argument, SelfArgument]] = []
+    def positional(self) -> Sequence[Argument | SelfArgument]:
+        ret: list[Argument | SelfArgument] = []
         ret.extend(self.pre_self_positional)
         if self.self_arg is not None:
             ret.append(self.self_arg)
@@ -2211,8 +2261,8 @@ class Arguments:
         return ret
 
     @property
-    def kwarg_only(self) -> Sequence[Union[Argument, TensorOptionsArguments]]:
-        ret: List[Union[Argument, TensorOptionsArguments]] = []
+    def kwarg_only(self) -> Sequence[Argument | TensorOptionsArguments]:
+        ret: list[Argument | TensorOptionsArguments] = []
         ret.extend(self.pre_tensor_options_kwarg_only)
         if self.tensor_options is not None:
             ret.append(self.tensor_options)
@@ -2220,14 +2270,14 @@ class Arguments:
         return ret
 
     @property
-    def all(self) -> Sequence[Union[Argument, SelfArgument, TensorOptionsArguments]]:
-        ret: List[Union[Argument, SelfArgument, TensorOptionsArguments]] = []
+    def all(self) -> Sequence[Argument | SelfArgument | TensorOptionsArguments]:
+        ret: list[Argument | SelfArgument | TensorOptionsArguments] = []
         ret.extend(self.positional)
         ret.extend(self.kwarg_only)
         ret.extend(self.out)
         return ret
 
-    def mutable_arg_names(self) -> List[str]:
+    def mutable_arg_names(self) -> list[str]:
         return [
             a.name
             for a in self.flat_all
@@ -2243,7 +2293,7 @@ class Arguments:
     def has_generator_arg(self) -> bool:
         return any(a.type.is_generator_like() for a in self.flat_non_out)
 
-    def signature(self, *, strip_default: bool = False) -> "Arguments":
+    def signature(self, *, strip_default: bool = False) -> Arguments:
         # dataclasses.replace could be used here, but it is less
         # type safe so for now I've opted to type everything out
         def strip_arg_annotation(a: Argument) -> Argument:
@@ -2258,9 +2308,11 @@ class Arguments:
             pre_self_positional=tuple(
                 map(strip_arg_annotation, self.pre_self_positional)
             ),
-            self_arg=SelfArgument(strip_arg_annotation(self.self_arg.argument))
-            if self.self_arg is not None
-            else None,
+            self_arg=(
+                SelfArgument(strip_arg_annotation(self.self_arg.argument))
+                if self.self_arg is not None
+                else None
+            ),
             post_self_positional=tuple(
                 map(strip_arg_annotation, self.post_self_positional)
             ),
@@ -2273,12 +2325,12 @@ class Arguments:
             # TensorOptions are dropped in signature,
             # so we can pair factory functions with their out= variants.
             tensor_options=None,
-            post_tensor_options_kwarg_only=tuple(),
+            post_tensor_options_kwarg_only=(),
             # out arguments are dropped in signature
             out=(),
         )
 
-    def remove_self_annotation(self) -> "Arguments":
+    def remove_self_annotation(self) -> Arguments:
         assert self.self_arg is not None
         return dataclasses.replace(
             self,
@@ -2287,7 +2339,7 @@ class Arguments:
             ),
         )
 
-    def with_out_args(self, outs: List[Argument]) -> "Arguments":
+    def with_out_args(self, outs: list[Argument]) -> Arguments:
         assert len(self.out) == 0
         return dataclasses.replace(
             self,
@@ -2295,10 +2347,10 @@ class Arguments:
         )
 
     @staticmethod
-    def _preparse(args: str) -> Tuple[List[Argument], List[Argument], List[Argument]]:
-        positional: List[Argument] = []
-        kwarg_only: List[Argument] = []
-        out: List[Argument] = []
+    def _preparse(args: str) -> tuple[list[Argument], list[Argument], list[Argument]]:
+        positional: list[Argument] = []
+        kwarg_only: list[Argument] = []
+        out: list[Argument] = []
         arguments_acc = positional
 
         # TODO: Use a real parser here; this will get bamboozled
@@ -2307,9 +2359,9 @@ class Arguments:
             if not arg:
                 continue
             if arg == "*":
-                assert (
-                    arguments_acc is positional
-                ), "invalid syntax: kwarg-only specifier * can only occur once"
+                assert arguments_acc is positional, (
+                    "invalid syntax: kwarg-only specifier * can only occur once"
+                )
                 arguments_acc = kwarg_only
                 continue
             parg = Argument.parse(arg)
@@ -2331,7 +2383,7 @@ class Arguments:
         return positional, kwarg_only, out
 
     @staticmethod
-    def parse(args: str) -> "Arguments":
+    def parse(args: str) -> Arguments:
         """
         Input: 'int x, int y, int z'
         """
@@ -2349,9 +2401,9 @@ class Arguments:
             if a.name == "self":
                 self_ix = i
                 break
-        pre_self_positional: List[Argument]
-        self_arg: Optional[SelfArgument]
-        post_self_positional: List[Argument]
+        pre_self_positional: list[Argument]
+        self_arg: SelfArgument | None
+        post_self_positional: list[Argument]
         if self_ix is not None:
             pre_self_positional = positional[:self_ix]
             self_arg = SelfArgument(positional[self_ix])
@@ -2362,9 +2414,9 @@ class Arguments:
             post_self_positional = positional
 
         # Group tensor options arguments
-        pre_tensor_options_kwarg_only: List[Argument] = []
-        tensor_options: Optional[TensorOptionsArguments] = None
-        post_tensor_options_kwarg_only: List[Argument] = []
+        pre_tensor_options_kwarg_only: list[Argument] = []
+        tensor_options: TensorOptionsArguments | None = None
+        post_tensor_options_kwarg_only: list[Argument] = []
         kwarg_only_acc = pre_tensor_options_kwarg_only
 
         def pred(name: str, ty: Type) -> Callable[[Argument], bool]:
@@ -2411,7 +2463,7 @@ class Arguments:
         )
 
     def __str__(self) -> str:
-        all_arguments: List[str] = []
+        all_arguments: list[str] = []
         all_arguments.extend(map(str, self.flat_positional))
         if self.flat_kwarg_only or self.out:
             all_arguments.append("*")
@@ -2434,9 +2486,9 @@ class Arguments:
             for a in self.pre_self_positional
             if a.annotation is not None and a.annotation.is_write
         ]
-        assert (
-            len(mutable_pre_self_positionals) == 0
-        ), "mutable pre_self_positional arguments are not currently supported in the schema"
+        assert len(mutable_pre_self_positionals) == 0, (
+            "mutable pre_self_positional arguments are not currently supported in the schema"
+        )
 
 
 # Names that validly are __iXXX__ indicating inplace operations.
@@ -2489,14 +2541,26 @@ class BaseOperatorName:
     # Doing that is BC-breaking though, so we're stuck with the above modeling.
     functional_overload: bool = False
 
+    # NB: We don't officially support namespace in FunctionSchema, we treat this prefix
+    # as part of the base operator name, for __str__() to consume.
+    # The canonical input (from the rest of the infra) will not contain namespace, but
+    # we have a usecase in ExecuTorch where we want to support BaseOperatorName with namespace.
+    namespace: Optional[str] = None
+
     @staticmethod
-    def parse(op: str) -> "BaseOperatorName":
+    def parse(op: str) -> BaseOperatorName:
         assert op != ""
         assert not op.endswith("_out"), (
             "_out suffix is reserved and not permitted for operator names; "
             "did you mean to specify an out overload name instead?"
         )
-        m = re.match(r"^__([^_]+)__$", op)
+        # Extract namespace out. Base operator name may or may not contain namespace.
+        # E.g., aten::__lshift__ is a valid base operator name, __lshift__ is also valid.
+        # We want to split the namespace out from the base operator name.
+        match = re.match(r"^(?:(.*)::)?(.*)$", op)
+        namespace = match.group(1) if match else ""
+        op_without_ns = match.group(2) if match else op
+        m = re.match(r"^__([^_]+)__$", op_without_ns)
         if m is not None:
             dunder_method = True
             base = m.group(1)
@@ -2512,7 +2576,7 @@ class BaseOperatorName:
                 assert base[0] != "i"
         else:
             dunder_method = False
-            base = op
+            base = op_without_ns
             if base[-1] == "_":
                 inplace = True
                 base = base[:-1]
@@ -2535,14 +2599,16 @@ class BaseOperatorName:
             inplace=inplace,
             dunder_method=dunder_method,
             functional_overload=functional_overload,
+            namespace=namespace,
         )
         assert str(r) == op, f"{str(r)} != {op}"
         return r
 
     def __str__(self) -> str:
+        namespace_prefix = f"{self.namespace}::" if self.namespace else ""
         if self.dunder_method:
             i = "i" if self.inplace else ""
-            return f"__{i}{self.base}__"
+            return f"{namespace_prefix}__{i}{self.base}__"
         else:
             i = (
                 "_"
@@ -2551,7 +2617,7 @@ class BaseOperatorName:
                 if self.functional_overload
                 else ""
             )
-            return f"{self.base}{i}"
+            return f"{namespace_prefix}{self.base}{i}"
 
 
 # Operator name is the base operator name along with the (typically not
@@ -2562,7 +2628,7 @@ class OperatorName:
     overload_name: str
 
     @staticmethod
-    def parse(op_name: str) -> "OperatorName":
+    def parse(op_name: str) -> OperatorName:
         if "." in op_name:
             name, overload_name = op_name.split(".", 1)
         else:
@@ -2589,7 +2655,7 @@ class OperatorName:
         else:
             return f"{self.name}"
 
-    def remove_inplace(self) -> "OperatorName":
+    def remove_inplace(self) -> OperatorName:
         return OperatorName(
             name=BaseOperatorName(
                 base=self.name.base,
@@ -2599,7 +2665,7 @@ class OperatorName:
             overload_name=self.overload_name,
         )
 
-    def with_overload(self, overload: str) -> "OperatorName":
+    def with_overload(self, overload: str) -> OperatorName:
         return OperatorName(
             name=BaseOperatorName(
                 base=self.name.base,
@@ -2637,9 +2703,9 @@ class NativeFunctionsViewGroup:
     # Note: the {view}_copy operator is optional because we currently don't generate copy variants
     # for all view ops. Notably, we don't generate them for CompositeImplicitAutograd views
     # (we already get them "for free" through decomposition)
-    view_copy: Optional[NativeFunction]
+    view_copy: NativeFunction | None
     # view_inplace ops are also optional, but every view_inplace op should have out-of-place variant.
-    view_inplace: Optional[NativeFunction]
+    view_inplace: NativeFunction | None
 
     def __post_init__(self) -> None:
         assert self.view.is_view_op
@@ -2671,9 +2737,7 @@ class NativeFunctionsViewGroup:
                 )
         if self.view.has_composite_implicit_autograd_nested_tensor_kernel:
             if self.view_inplace is not None:
-                assert (
-                    self.view_inplace.has_composite_implicit_autograd_nested_tensor_kernel
-                ), (
+                assert self.view_inplace.has_composite_implicit_autograd_nested_tensor_kernel, (
                     f"{str(self.view.func.name)} and {str(self.view_inplace.func.name)} must either"
                     " both have CompositeImplicitAutogradNestedTensor kernels, or both not have composite kernels."
                 )
@@ -2719,7 +2783,7 @@ def gets_generated_view_copy(f: NativeFunction) -> bool:
 
 # Given a NativeFunction that corresponds to a view op,
 # returns the OperatorName of the corresponding "copy" variant of the op.
-def get_view_copy_name(f: NativeFunction) -> "OperatorName":
+def get_view_copy_name(f: NativeFunction) -> OperatorName:
     # Right now, when asking for a view op's corresponding "view_copy" name
     # we assert for sanity that the op is allowed to have a generated view_copy variant.
     # (We can do this because "gets_generated_view_copy()" tell us which ops get a generated view_copy op).
@@ -2743,7 +2807,7 @@ def get_view_copy_name(f: NativeFunction) -> "OperatorName":
 # Helper functions for parsing argument lists (both inputs and returns)
 
 
-def parse_returns(return_decl: str) -> Tuple[Return, ...]:
+def parse_returns(return_decl: str) -> tuple[Return, ...]:
     """
     Input: '()'
     Output: []
@@ -2762,12 +2826,12 @@ def parse_returns(return_decl: str) -> Tuple[Return, ...]:
 class Precompute:
     # A map from kernel argument name -> a list of precomputed
     # elements that replaces/supersedes it.
-    replace: Dict[str, List[Argument]]
+    replace: dict[str, list[Argument]]
     # List of precomputed args added without replacement
-    add: List[Argument]
+    add: list[Argument]
 
     @staticmethod
-    def parse(src: object) -> "Precompute":
+    def parse(src: object) -> Precompute:
         assert isinstance(src, list)
 
         # src is a list of strings of the format:
@@ -2792,6 +2856,9 @@ class Precompute:
             )
 
             arg, with_list_raw = raw_replace_item.split(" -> ")
+            assert " " not in arg, (
+                f"illegal kernel param name '{arg}' in precomputed parameters'"
+            )
             with_list = with_list_raw.split(",")
             with_list_args = [Argument.parse(name.strip()) for name in with_list]
             replace[arg] = with_list_args
@@ -2809,7 +2876,7 @@ class Precompute:
             for a in args:
                 assert a.name.upper() != a.name
 
-    def to_list(self) -> List[str]:
+    def to_list(self) -> list[str]:
         replace_list = []
         for kernel_param, replacement_params in self.replace.items():
             replacements = ", ".join(str(param) for param in replacement_params)

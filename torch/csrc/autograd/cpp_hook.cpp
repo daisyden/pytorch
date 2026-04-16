@@ -19,8 +19,7 @@ void check_single_result(
 }
 } // namespace
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 
 CppFunctionTensorPreHook::CppFunctionTensorPreHook(
     std::shared_ptr<hooks_list> hooks,
@@ -41,7 +40,7 @@ variable_list CppFunctionTensorPreHook::operator()(
       // Don't change gradient
       continue;
     }
-    check_single_result(value, res, c10::to_string(i));
+    check_single_result(value, res, std::to_string(i));
     value = std::move(res);
   }
   variable_list results(values);
@@ -65,5 +64,9 @@ variable_list CppFunctionSingleTensorPreHook::operator()(
   return results;
 }
 
-} // namespace autograd
-} // namespace torch
+void CppFunctionSingleTensorPreHook::compiled_args(
+    torch::dynamo::autograd::CompiledNodeArgs& args) const {
+  args.add_cpp_single_tensor_pre_hook(hook_, value_idx_);
+}
+
+} // namespace torch::autograd

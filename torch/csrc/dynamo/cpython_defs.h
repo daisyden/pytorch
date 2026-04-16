@@ -8,11 +8,7 @@
 
 #if IS_PYTHON_3_11_PLUS
 
-#include <internal/pycore_frame.h>
-
-int THP_PyFrame_FastToLocalsWithError(
-    _PyInterpreterFrame* frame,
-    int* free_vars_copied);
+typedef struct _PyInterpreterFrame _PyInterpreterFrame;
 
 PyFunctionObject* _PyFunction_CopyWithNewCode(
     PyFunctionObject* o,

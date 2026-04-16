@@ -20,7 +20,7 @@
 #endif
 #endif
 
-namespace at { namespace native {
+namespace at::native {
 
 // Mapping ScalarType to ideep tensor data_type
 TORCH_API ideep::tensor::data_type get_mkldnn_dtype(ScalarType type);
@@ -28,11 +28,23 @@ static inline ideep::tensor::data_type get_mkldnn_dtype(const Tensor& t) {
   return get_mkldnn_dtype(t.scalar_type());
 }
 
+TORCH_API int64_t data_ptr_from_mkldnn(const Tensor& mkldnn_tensor);
+
+TORCH_API at::Tensor mkldnn_tensor_from_data_ptr(
+    void* data_ptr,
+    at::IntArrayRef dims,
+    at::ScalarType dtype,
+    at::Device device,
+    const uint8_t* opaque_metadata,
+    int64_t opaque_metadata_size);
+
 // Construct aten MKL-DNN tensor given an ideep tensor
-TORCH_API Tensor new_with_itensor_mkldnn(ideep::tensor&& it, c10::optional<ScalarType> dtype, c10::optional<Device> device);
+TORCH_API Tensor new_with_itensor_mkldnn(ideep::tensor&& it, std::optional<ScalarType> dtype, std::optional<Device> device);
 
 // Retrieve `ideep::tensor` from MKL-DNN tensor
 TORCH_API ideep::tensor& itensor_from_mkldnn(const Tensor& mkldnn_tensor);
+
+TORCH_API int64_t nbytes_from_mkldnn(const Tensor& mkldnn_tensor);
 
 // Construct an `ideep::tensor` "view" from dense tensor, note the
 // ideep::tensor will share the underlying buffer
@@ -50,6 +62,6 @@ TORCH_API ideep::tensor itensor_from_tensor(const Tensor& tensor, bool from_cons
 // Set MKLDNN verbose level
 TORCH_API int set_verbose(int level);
 
-}}
+}
 
 #endif // AT_MKLDNN_ENABLED
