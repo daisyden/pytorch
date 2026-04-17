@@ -332,6 +332,107 @@ _dtype_list.add(torch.bfloat16)
 
 **Fix:** Ensure patch applied early, before test decorators evaluated
 
+### Issue 5: CUDNN_ATTENTION Backend Not Supported on XPU
+
+**Symptom:** SDPA backend3 tests fail with:
+```
+RuntimeError: No viable backend for scaled_dot_product_attention was found
+```
+
+**Root cause:** XPU lacks cuDNN hardware/software support
+
+**Decision:**
+- If backend is known unsupported on XPU → enable test anyway (will fail with documented issue)
+- Track failures for future kernel implementation milestones
+
+**Implementation:**
+```python
+# Add CUDNN_ATTENTION to platform-specific backends
+if TEST_XPU and SDPBackend.CUDNN_ATTENTION not in PLATFORM_SPECIFIC_SDPA:
+    PLATFORM_SPECIFIC_SDPA.append(SDPBackend.CUDNN_ATTENTION)
+
+# DO NOT add skip for CUDNN_ATTENTION on XPU - let it fail
+# Only skip for OTHER device-specific reasons:
+if device == "cuda" and backend == SDPBackend.CUDNN_ATTENTION and condition:
+    raise unittest.SkipTest("...")  # CUDA-specific skip only
+```
+
+## Handling CUDNN_ATTENTION on XPU (Known Limitation)
+
+For SDPA/CUDNN_ATTENTION tests, XPU lacks cuDNN hardware/software support.
+When enabling such tests:
+
+### Test Execution Environment
+
+```bash
+# Activate pytorch environment (conda)
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate pytorch_opencode_env
+
+# Run from /tmp to avoid local functorch import conflicts
+cd /tmp
+
+# Set PYTHONPATH for test discovery
+export PYTHONPATH=/home/daisydeng/daisy_pytorch/test/functorch:/tmp
+
+# Run backend3 tests
+python -m pytest test_vmap_xpu.py -k "backend3 and (test_randomness or test_sdpa)" -v --tb=short
+```
+
+### Test Naming Convention
+
+XPU tests use `_xpu` suffix instead of `_cuda`:
+```bash
+# Wrong (CUDA naming)
+test_randomness_backend3_randomness_error_cuda
+
+# Correct (XPU naming)
+test_randomness_backend3_randomness_error_xpu
+```
+
+### Expected Behavior
+
+After enabling CUDNN_ATTENTION on XPU:
+1. **Test discovers** - Test found in collection
+2. **Test runs** - Executes but fails with known issue
+3. **Error message:** `RuntimeError: No viable backend for scaled_dot_product_attention was found`
+4. **This is EXPECTED** - Document in PR/commit message
+
+### Commit Pattern for Known Failing Tests
+
+```bash
+git commit -m "XPU: Enable CUDNN_ATTENTION backend3 SDPA tests (will fail with known issue)
+
+Enables previously skipped SDPA backend3 tests for XPU tracking:
+- test_randomness_backend3_randomness_different_xpu
+- test_randomness_backend3_randomness_error_xpu
+- test_randomness_backend3_randomness_same_xpu
+- test_sdpa_backend3_xpu
+
+Tests fail with: No viable backend for scaled_dot_product_attention
+See: https://github.com/intel/torch-xpu-ops/issues/3229
+"
+```
+
+## Preconditions for SDPA Test Porting
+
+1. **Environment Setup:**
+   - Working conda env: `pytorch_opencode_env`
+   - Intel oneAPI: `/opt/intel/oneapi/compiler/2025.0/`
+   - PyTorch with XPU support
+
+2. **torch-xpu-ops Structure:**
+   ```
+   third_party/torch-xpu-ops/test/xpu/functorch/
+   ├── test_vmap_xpu.py           # Contains SDPA tests
+   └── PLATFORM_SPECIFIC_SDPA     # Backend list
+   ```
+
+3. **Key Variables:**
+   - `PLATFORM_SPECIFIC_SDPA`: List of enabled backends
+   - `TEST_XPU`: Boolean, XPU is available
+   - `SDPBackend.CUDNN_ATTENTION`: Backend enum value 3
+
 ## Template Outline
 
 ### For Direct Copy Test
@@ -425,6 +526,7 @@ Test{{Name}}Class.test_method = _xpu_test_method
 - OpInfo dtypes patching for XPU coverage
 - XPUPatchForImport usage patterns
 - Test discovery and execution verification
+- SDPA backend3 (CUDNN_ATTENTION) XPU test enabling with known limitations
 
 **This skill does NOT cover:**
 - C++ kernel implementation
