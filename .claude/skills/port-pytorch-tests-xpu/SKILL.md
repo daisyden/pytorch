@@ -82,177 +82,140 @@ TestModule.test_multiple_device_transfer = _test_multiple_device_transfer
 
 ## Workflow Steps
 
-### Step 1: Identify Missing Test
+### Step 1: Find CUDA Test and Map to XPU
 
-Determine if a test is missing for XPU:
-
-1. Check pytorch test source:
+1. Locate the CUDA test in pytorch repo:
    ```bash
-   grep "test_name" pytorch/test/*.py
+   grep "test_name" test/*.py  # Find source test
    ```
 
-2. Check if XPU counterpart exists:
+2. Map CUDA test naming to XPU by changing suffix:
+   ```
+   test_name_cuda -> test_name_xpu
+   ```
+
+3. Check if XPU version already exists:
    ```bash
-   grep "test_name" third_party/torch-xpu-ops/test/xpu/*.py
+   grep "test_name_xpu" third_party/torch-xpu-ops/test/xpu/*.py
    ```
 
-3. Run test collection to discover:
-   ```bash
-   python -m pytest test/xpu/test_meta_xpu.py --collect-only 2>&1 | grep -i "test_name"
-   ```
+### Step 2: Update/Create XPU Test in torch-xpu-ops
 
-### Step 2: Analyze Source Test
+If test exists in `third_party/torch-xpu-ops/test/xpu/`:
+- Edit the existing test file directly
+- Keep changes localized to torch-xpu-ops repo
 
-Read and understand the pytorch source test:
+If test does not exist:
+- Copy from pytorch/test to torch-xpu-ops/test/xpu/
+- Add `_xpu` suffix to file and class names
+- Use appropriate porting approach (see Porting Approaches)
 
-1. **File location**: Find pytorch test in `test/test_*.py`
-2. **Test class**: Identify class (e.g., `TestMetaCUDA`, `TestSDPACudaOnly`)
-3. **Test method**: Identify specific test method
-4. **Dependencies**: Check imports, fixtures, utilities used
-5. **Device dependency**: Note if uses `@onlyCUDA`, `device='cuda'`, CUDA-specific checks
+### Step 3: Run Test in Conda Environment
 
-### Step 3: Determine Porting Approach
+```bash
+# Activate pytorch conda environment
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate pytorch_opencode_env
 
-Choose based on device-specific logic:
+# Run from /tmp to avoid local import conflicts
+cd /tmp
 
-**Direct Copy if:**
-- Test is device-agnostic
-- Uses standard `device` parameter
-- No CUDA-specific code patterns
-- Test pattern applies universally to XPU
+# Set PYTHONPATH for test discovery
+export PYTHONPATH=$HOME/daisy_pytorch/test/functorch:/tmp
 
-**Hook Override if:**
-- Test has CUDA-specific logic that needs XPU override
-- Limited number of tests require modification
-- Want to maintain single source of truth
-- Can generalize CUDA-specific to XPU
+# Copy test file to /tmp for isolated execution
+cp $HOME/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/functorch/test_vmap_xpu.py /tmp/
 
-### Step 4: Locate/Determine Implementation
-
-**For Approach 1 (Direct Copy):**
-
-1. Copy pytorch test to xpu folder with `_xpu` suffix
-2. Add XPU-specific imports:
-   ```python
-   import torch.xpu  # For XPU device checks
-   ```
-3. Modify instantiations:
-   ```python
-   only_for=("cuda", "xpu")  # Extend CUDA-only tests
-   allow_xpu=True            # Enable XPU instantiation
-   ```
-4. Check for XPU-specific adaptations needed
-
-**For Approach 2 (Hook Override):**
-
-1. Use existing or create xpu test file
-2. Import source test via XPUPatchForImport:
-   ```python
-   from xpu_test_utils import XPUPatchForImport
-
-   with XPUPatchForImport(False):
-       from test_modules import TestModule
-   ```
-3. Define XPU-specific override functions
-4. Assign overrides to TestClass:
-   ```python
-   TestModule.method_name = _xpu_method_name
-   ```
-
-### Step 5: Handle Complex Cases
-
-#### Handling dtypesIfCUDA for OpInfo
-
-When OpInfo has CUDA-only dtype conditions:
-
-**Problem:** OpInfo often has `SM53OrLater` checks:
-```python
-# common_methods_invocations.py
-dtypesIfCUDA=floating_and_complex_types_and(torch.float16,
-    *[torch.bfloat16] if SM53OrLater else [])
+# Run specific test
+python -m pytest test_vmap_xpu.py -k "test_name_xpu" -v --tb=short
 ```
-On XPU, `SM53OrLater` evaluates to False, missing bfloat16.
 
-**Solution:** Patch OpInfo dtypes directly:
+### Step 4: Analyze Why Test Does Not Run
+
+Common reasons for tests not discovering or running:
+
+1. **Missing backend in platform list** - Add missing backends
+2. **OpInfo dtypesIf condition** - Patch dtypesIf for XPU (see Step 5)
+3. **Device restriction decorators** - Extend to include XPU
+4. **Skip decorators** - Adjust for XPU-specific conditions
+5. **Platform check failures** - Review `PLATFORM_*` variables
+
+### Step 5: Enable Test with Appropriate Solution
+
+#### Solution A: Add Backend to Platform List
+
 ```python
-# At module top in test file
+# Add missing backend for XPU
+if TEST_XPU and SDPBackend.MISSING not in PLATFORM_SPECIFIC_SDPA:
+    PLATFORM_SPECIFIC_SDPA.append(SDPBackend.MISSING)
+```
+
+#### Solution B: Patch OpInfo dtypesIfCUDA
+
+When `SM53OrLater` or similar conditions exclude XPU:
+
+```python
+# Patch at module top
+bf16 = torch.bfloat16
+_ops = ["op1", "op2"]
 for _op in op_db:
-    if _op.name == "addbmm":
-        # Update all dtype lists
+    if _op.name in _ops:
         for _dtype_list in [_op.dtypesIfCUDA, _op.dtypesIfXPU, _op.dtypesIf.get("xpu")]:
-            if _dtype_list is not None and torch.bfloat16 not in _dtype_list:
-                _dtype_list.add(torch.bfloat16)
-        break
+            if _dtype_list is not None and bf16 not in _dtype_list:
+                _dtype_list.add(bf16)
 ```
 
-**Critical Constraint:** Do NOT use direct assignment for dtypesIf:
+**Constraint:** Mutate in place with `.add()`, never use direct assignment for OpInfo dtypes.
+
+#### Solution C: Update Device-Specific Checks
+
+Ensure CUDA-specific checks include device parameter:
 ```python
-# WRONG - bypasses setter validation
-_op.dtypesIfCUDA = frozenset(...)
+# Before (CUDA only)
+if backend == SDPBackend.X and randomness == "different":
 
-# CORRECT - mutates in place
-_dtype_list = set(_op.dtypesIfCUDA)
-_dtype_list.add(torch.bfloat16)
-_op.dtypesIfCUDA = _dtype_list  # Still fails - setter expects original type
+# After (CUDA + XPU)
+if backend == SDPBackend.X and randomness == "different" and device == "cuda":
 ```
 
-**Best Practice:** Mutate existing set in place using `.add()`:
-```python
-_dtype_list.add(bf16)  # In-place modification
-```
+### Step 6: Check Intel torch-xpu-ops Issues for Known Failures
 
-#### Handling onlyCUDA Decorator
+If test fails after enabling:
 
-Convert CUDA-only to XPU:
-```python
-# XPUPatchForImport monkey-patches onlyCUDA -> onlyXPU
-# So tests with @onlyCUDA automatically run on XPU
-```
+1. Search intel/torch-xpu-ops GitHub issues:
+   - https://github.com/intel/torch-xpu-ops/issues
 
-If explicitly needed:
-```python
-# Import the onlyXPU variant
-from xpu_test_utils import onlyOn
-```
+2. Check for similar documented issues:
+   - Keyword: test name or error pattern
+   - Label: `xpu`, `backend`, specific operator
 
-### Step 6: Verify Test Discovery
+3. If known issue found:
+   - Document issue URL in commit/PR
+   - Enable test anyway (will fail with tracked limitation)
+   - Do NOT add skip unless directed
 
-Run test collection:
-```bash
-python -m pytest test/xpu/test_meta_xpu.py --collect-only 2>&1 | grep -i "test_name.*bfloat16"
-```
-
-Verify specific test:
-```bash
-python -m pytest test/xpu/test_meta_xpu.py -k "test_dispatch_meta_inplace_addbmm_xpu_bfloat16" -v
-```
-
-### Step 7: Run Individual Test
-
-Execute the ported test:
-```bash
-python -m pytest test/xpu/test_meta_xpu.py::TestMetaXPU::test_name -v --timeout=120
-```
-
-Verify PASS/FAIL status.
-
-### Step 8: Commit Changes
-
-Follow agent-guidelines for atomic commits:
+### Step 7: Verify and Commit
 
 ```bash
-# Show diff
-git diff test/xpu/test_meta_xpu.py
+# Verify test discovers
+python -m pytest test_vmap_xpu.py --collect-only 2>&1 | grep "test_name"
 
-# Stage and commit
-git add test/xpu/test_meta_xpu.py
-git commit -m "XPU: Add bfloat16 dtype support for addbmm operator tests
+# Run and verify behavior
+python -m pytest test_vmap_xpu.py -k "test_name_xpu" -v --tb=short
 
-Enables previously missing XPU tests for addbmm with bfloat16:
-- test_dispatch_meta_inplace_addbmm_xpu_bfloat16
-- test_dispatch_meta_outplace_addbmm_xpu_bfloat16
+# Review diff
+git diff third_party/torch-xpu-ops/test/xpu/
 
-Root cause: OpInfo dtypesIfCUDA has SM53OrLater check excluding bfloat16 on XPU
+# Commit with descriptive message
+git add third_party/torch-xpu-ops/test/xpu/test_name_xpu.py
+git commit -m "XPU: Enable test_name_xpu tests
+
+Enables XPU coverage for:
+- test_name_xpu_variant1
+- test_name_xpu_variant2
+
+Solution: [rief description of change]
+Reference: https://github.com/intel/torch-xpu-ops/issues/XXXX
 "
 ```
 
@@ -296,184 +259,77 @@ common_device_type.dtypesIfXPU = get_dtypesIf_mock("xpu")
 **Symptom:** Test exists in pytorch but not in torch-xpu-ops collection
 
 **Check:**
-1. OpInfo skip decorators
-2. Device restriction (`only_for="cuda"` missing `xpu`)
+1. Check if test exists in torch-xpu-ops test directory
+2. OpInfo skip decorators or device restrictions
 3. dtypesIf condition not including XPU
 
-**Fix:** Apply appropriate porting approach
+**Fix:** Apply Steps 2-5 above
 
-### Issue 2: bfloat16 Tests Missing
-
-**Symptom:** Tests for dtype `bfloat16` not generating
-
-**Root cause:** `SM53OrLater` condition in OpInfo dtypesIfCUDA
-
-**Fix:** Patch OpInfo dtypes directly at module load time:
-```python
-# See Step 5: Handling dtypesIfCUDA for OpInfo
-```
-
-### Issue 3: dtypesIf Setter Error
+### Issue 2: dtypesIf Setter Error
 
 **Symptom:** `AssertionError: Expected _dispatch_dtypes or None`
 
 **Cause:** Direct assignment bypasses OpInfo property setter
 
-**Fix:** Mutate in place:
+**Fix:** Mutate in place using `.add()`:
 ```python
 _dtype_list.add(torch.bfloat16)
 ```
 
-### Issue 4: XPUPatchForImport Scope
+### Issue 3: Backend Not Supported on XPU (Known Limitation)
 
-**Symptom:** Changes not taking effect
+**Symptom:** Test fails with unknown backend or no viable backend error
 
-**Cause:** Import ordering or scope issues
+**Example:** `RuntimeError: No viable backend for scaled_dot_product_attention was found`
 
-**Fix:** Ensure patch applied early, before test decorators evaluated
-
-### Issue 5: CUDNN_ATTENTION Backend Not Supported on XPU
-
-**Symptom:** SDPA backend3 tests fail with:
-```
-RuntimeError: No viable backend for scaled_dot_product_attention was found
-```
-
-**Root cause:** XPU lacks cuDNN hardware/software support
+**Root cause:** XPU lacks cuDNN hardware/software for certain backends
 
 **Decision:**
-- If backend is known unsupported on XPU → enable test anyway (will fail with documented issue)
-- Track failures for future kernel implementation milestones
+- If backend is known unsupported on XPU → enable test anyway (tracks limitation)
+- Check intel/torch-xpu-ops issues for documented cases
 
 **Implementation:**
 ```python
-# Add CUDNN_ATTENTION to platform-specific backends
-if TEST_XPU and SDPBackend.CUDNN_ATTENTION not in PLATFORM_SPECIFIC_SDPA:
-    PLATFORM_SPECIFIC_SDPA.append(SDPBackend.CUDNN_ATTENTION)
+# Force add unsupported backend to platform list
+if TEST_XPU and SDPBackend.UNSUPPORTED not in PLATFORM_LIST:
+    PLATFORM_LIST.append(SDPBackend.UNSUPPORTED)
 
-# DO NOT add skip for CUDNN_ATTENTION on XPU - let it fail
-# Only skip for OTHER device-specific reasons:
-if device == "cuda" and backend == SDPBackend.CUDNN_ATTENTION and condition:
-    raise unittest.SkipTest("...")  # CUDA-specific skip only
+# Remove skip that blocks XPU testing:
+# if device == "xpu" and backend == SDPBackend.UNSUPPORTED:
+#     raise unittest.SkipTest("...")  # REMOVE this
 ```
-
-## Handling CUDNN_ATTENTION on XPU (Known Limitation)
-
-For SDPA/CUDNN_ATTENTION tests, XPU lacks cuDNN hardware/software support.
-When enabling such tests:
-
-### Test Execution Environment
-
-```bash
-# Activate pytorch environment (conda)
-source ~/miniforge3/etc/profile.d/conda.sh
-conda activate pytorch_opencode_env
-
-# Run from /tmp to avoid local functorch import conflicts
-cd /tmp
-
-# Set PYTHONPATH for test discovery
-export PYTHONPATH=/home/daisydeng/daisy_pytorch/test/functorch:/tmp
-
-# Run backend3 tests
-python -m pytest test_vmap_xpu.py -k "backend3 and (test_randomness or test_sdpa)" -v --tb=short
-```
-
-### Test Naming Convention
-
-XPU tests use `_xpu` suffix instead of `_cuda`:
-```bash
-# Wrong (CUDA naming)
-test_randomness_backend3_randomness_error_cuda
-
-# Correct (XPU naming)
-test_randomness_backend3_randomness_error_xpu
-```
-
-### Expected Behavior
-
-After enabling CUDNN_ATTENTION on XPU:
-1. **Test discovers** - Test found in collection
-2. **Test runs** - Executes but fails with known issue
-3. **Error message:** `RuntimeError: No viable backend for scaled_dot_product_attention was found`
-4. **This is EXPECTED** - Document in PR/commit message
-
-### Commit Pattern for Known Failing Tests
-
-```bash
-git commit -m "XPU: Enable CUDNN_ATTENTION backend3 SDPA tests (will fail with known issue)
-
-Enables previously skipped SDPA backend3 tests for XPU tracking:
-- test_randomness_backend3_randomness_different_xpu
-- test_randomness_backend3_randomness_error_xpu
-- test_randomness_backend3_randomness_same_xpu
-- test_sdpa_backend3_xpu
-
-Tests fail with: No viable backend for scaled_dot_product_attention
-See: https://github.com/intel/torch-xpu-ops/issues/3229
-"
-```
-
-## Preconditions for SDPA Test Porting
-
-1. **Environment Setup:**
-   - Working conda env: `pytorch_opencode_env`
-   - Intel oneAPI: `/opt/intel/oneapi/compiler/2025.0/`
-   - PyTorch with XPU support
-
-2. **torch-xpu-ops Structure:**
-   ```
-   third_party/torch-xpu-ops/test/xpu/functorch/
-   ├── test_vmap_xpu.py           # Contains SDPA tests
-   └── PLATFORM_SPECIFIC_SDPA     # Backend list
-   ```
-
-3. **Key Variables:**
-   - `PLATFORM_SPECIFIC_SDPA`: List of enabled backends
-   - `TEST_XPU`: Boolean, XPU is available
-   - `SDPBackend.CUDNN_ATTENTION`: Backend enum value 3
 
 ## Template Outline
 
 ### For Direct Copy Test
 
 ```python
-# third_party/torch-xpu-ops/test/xpu/test_{{name}}_xpu.py
+# third_party/torch-xpu-ops/test/xpu/test_name_xpu.py
 """
-XPU specific tests for {{name}}
-Migrated from pytorch/test/test_{{name}}.py
+XPU specific tests for test_name.
+Modified from pytorch/test/test_name.py
 """
 
-# Required imports
 import torch
-import itertools
-
-# Import source test utilities
 from torch.testing._internal.common_utils import (
-    TestCase, run_tests, parametrize, instantiate_device_type_tests
+    TestCase, run_tests, instantiate_device_type_tests
 )
-
-# XPU-specific imports
 from xpu_test_utils import XPUPatchForImport
 
 # Patch op_db if needed for dtype coverage
 for _op in op_db:
-    if _op.name == "{{op_name}}":
+    if _op.name in ["op1", "op2"]:
         for _dtype_list in [_op.dtypesIfCUDA, _op.dtypesIfXPU, _op.dtypesIf.get("xpu")]:
             if _dtype_list is not None and torch.bfloat16 not in _dtype_list:
                 _dtype_list.add(torch.bfloat16)
-        break
 
 # Import source test
 with XPUPatchForImport(False):
-    from test_{{name}} import Test{{Name}}Class
-
-# Only if method overrides needed:
-# Test{{Name}}Class.test_method = _xpu_test_method
+    from test_name import TestNameClass
 
 # XPU instantiation
 instantiate_device_type_tests(
-    Test{{Name}}Class, globals(), only_for="xpu", allow_xpu=True
+    TestNameClass, globals(), only_for=("cuda", "xpu"), allow_xpu=True
 )
 
 if __name__ == "__main__":
@@ -483,53 +339,50 @@ if __name__ == "__main__":
 ### For Hook Override Test
 
 ```python
-# third_party/torch-xpu-ops/test/xpu/test_{{name}}_xpu.py
+# third_party/torch-xpu-ops/test/xpu/test_name_xpu.py
 """
-XPU specific test overrides for {{name}}
-Uses XPUPatchForImport for selective overrides
+XPU specific test overrides for test_name.
+Uses XPUPatchForImport for selective overrides.
 """
 
 import torch
 from xpu_test_utils import XPUPatchForImport
 
-# Import source test
 with XPUPatchForImport(False):
-    from test_{{name}} import Test{{Name}}Class
+    from test_name import TestNameClass
 
-# Define XPU-specific test override
 def _xpu_test_method(self, device):
     # XPU implementation
     ...
 
-# Apply overrides
-Test{{Name}}Class.test_method = _xpu_test_method
-
-# Register for collection
-# Source test's instantiation already handles XPU discovery
+TestNameClass.test_method = _xpu_test_method
 ```
 
 ## Checklist Before Commit
 
-- [ ] Test identified as missing
-- [ ] Source test analyzed
-- [ ] Appropriate approach chosen (Direct Copy or Hook Override)
-- [ ] Implementation complete
+- [ ] CUDA test located and mapped to XPU naming (_cuda -> _xpu)
+- [ ] XPU test updated/created in third_party/torch-xpu-ops/test/xpu/
+- [ ] Test runs in pytorch_opencode_env conda environment
 - [ ] Test discovery verified (--collect-only)
-- [ ] Test execution passes
+- [ ] Failure analyzed (if any)
+- [ ] Intel torch-xpu-ops issues checked for similar cases
+- [ ] Solution implemented and test re-run
 - [ ] Atomic commit created
 - [ ] PR description prepared (if upstream contribution)
 
 ## Boundaries
 
 **This skill covers:**
-- Unit test porting from pytorch/test to torch-xpu-ops/test/xpu/
-- OpInfo dtypes patching for XPU coverage
-- XPUPatchForImport usage patterns
-- Test discovery and execution verification
-- SDPA backend3 (CUDNN_ATTENTION) XPU test enabling with known limitations
+- Porting CUDA tests to XPU by mapping _cuda suffix to _xpu
+- Editing existing tests in third_party/torch-xpu-ops/test/xpu/
+- Running tests in pytorch_opencode_env conda environment
+- Analyzing and resolving missing test discovery
+- Enabling tests with known limitations tracked via intel/torch-xpu-ops issues
+- Restarting unsupported backends (like CUDNN_ATTENTION) for tracking
 
 **This skill does NOT cover:**
 - C++ kernel implementation
 - Operator registration
 - Build system changes
 - Documentation writing
+- Pattern-matching specific test files (each case is unique)
