@@ -231,6 +231,100 @@ Reference: https://github.com/intel/torch-xpu-ops/issues/XXXX
 | `onlyXPU` | XPU device restriction decorator |
 | `skipXPU` | XPU skip decorator |
 
+## Dtype Alignment: Core Pattern
+
+**Critical Discovery:** CUDA tests use `@dtypesIfCUDA` decorators for GPU-specific dtypes. XPU tests MUST have equivalent `@dtypesIfXPU` decorators to enable the same dtype coverage.
+
+### The Pattern
+
+Each test with `@dtypesIfCUDA(X, Y, Z)` needs a corresponding `@dtypesIfXPU(X, Y, Z)`:
+
+```python
+# CUDA source test_nn.py:
+@dtypesIfCUDA(torch.half, torch.float)
+def test_softmax_results(self, device, dtype):
+    ...
+
+# XPU aligned test_nn_xpu.py:
+from torch.testing._internal.common_device_type import (
+    dtypes,
+    dtypesIfCUDA,
+    dtypesIfXPU,  # MUST import dtypesIfXPU
+    instantiate_device_type_tests,
+    # ... other imports
+)
+
+@dtypesIfCUDA(torch.half, torch.float)
+@dtypesIfXPU(torch.half, torch.float)  # ALIGN WITH CUDA!
+def test_softmax_results(self, device, dtype):
+    ...
+```
+
+### Step-by-Step Dtype Alignment
+
+1. **Find CUDA dtypesIfCUDA decorator** for the test:
+
+   ```bash
+   grep -B1 "def test_name" test/test_nn.py | grep "@dtypesIfCUDA"
+   # Example output: @dtypesIfCUDA(torch.half, torch.float, torch.double)
+   ```
+
+2. **Check XPU file** for existing `@dtypesIfXPU`:
+
+   ```bash
+   grep -A1 "@dtypesIfXPU" third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py
+   ```
+
+3. **Add/update @dtypesIfXPU** to match @dtypesIfCUDA exactly:
+
+   ```python
+   # Before (WRONG - missing dtypes):
+   @dtypesIfCUDA(torch.half, torch.float, torch.double)
+   @dtypesIfXPU(torch.half)  # WRONG!
+
+   # After (CORRECT - aligned with CUDA):
+   @dtypesIfCUDA(torch.half, torch.float, torch.double)
+   @dtypesIfXPU(torch.half, torch.float, torch.double)  # CORRECT!
+   ```
+
+4. **Verify import** - ensure `dtypesIfXPU` is imported:
+
+   ```python
+   from torch.testing._internal.common_device_type import (
+       dtypes,
+       dtypesIfCUDA,
+       dtypesIfXPU,  # Add this import
+       # ... other imports
+   )
+   ```
+
+5. **Collect tests** to verify dtype variants appear:
+
+   ```bash
+   python -m pytest test_nn_xpu.py -k "test_name_xpu" --collect-only 2>&1 | grep "Function"
+   # Should see: test_name_xpu_float16, test_name_xpu_float32, etc.
+   ```
+
+### Common Dtype Gaps Found
+
+| CUDA dtypesIfCUDA | XPU Required dtypesIfXPU |
+|-------------------|-------------------------|
+| `torch.half` | `torch.half` (float16) |
+| `torch.float` | `torch.float` (float32) |
+| `torch.double` | `torch.double` (float64) |
+| `torch.bfloat16` | `torch.bfloat16` (bfloat16) |
+| `torch.complex128` | `torch.complex128` |
+| Combinations | Match exactly |
+
+### Validation Checklist
+
+After adding @dtypesIfXPU decorators:
+
+- [ ] `dtypesIfXPU` imported in test file header
+- [ ] Each `@dtypesIfCUDA(A, B, C)` has corresponding `@dtypesIfXPU(A, B, C)`
+- [ ] Test collection shows expected dtype variants: `test_name_xpu_float16`, `test_name_xpu_bfloat16`, etc.
+- [ ] Tests pass (or fail with documented known limitations)
+
 ### XPUPatchForImport Initialization
 
 ```python
@@ -358,15 +452,64 @@ def _xpu_test_method(self, device):
 TestNameClass.test_method = _xpu_test_method
 ```
 
+## Case Study: NestedTensor SDPA Tests
+
+### Background
+
+Tests like `test_sdpa_with_packed_in_proj` use nested tensors with SDPA. These tests may have CUDA-specific conditions:
+
+```python
+# NestedTensor SDPA test has PLATFORM check
+@unittest.skipIf(
+    not PLATFORM_SUPPORTS_FUSED_ATTENTION,
+    "Platform doesn't support flash or mem-efficient attention",
+)
+```
+
+### Challenge
+
+XPU may lack support for certain features even when dtype alignment is correct. This results in tests that:
+1. **Discover successfully** (dtype variants found)
+2. **Fail at runtime** with "No viable backend" error
+
+### Approach: Enable-But-Track-Fail
+
+For XPU limitations (not bugs):
+
+1. **Enable the test** - don't add skip just because XPU fails
+2. **Document the known limitation** - reference intel/torch-xpu-ops issue
+3. **Track the gap** - let CI show where kernel support is missing
+
+```python
+# Example: SDPA with packed in_proj on XPU has known limitation
+@skipXPUIf(
+    True,  # Always skip due to known limitation
+    "XPU nestedtensor SDPA requires fused attention kernel support"
+)
+# OR use @expectedFailureXPU decorator
+```
+
+### Decision Matrix
+
+| Situation | Action |
+|-----------|--------|
+| Type bug (wrong logic) | Fix the test implementation |
+| Missing dtype coverage | Add @dtypesIfXPU to align with CUDA |
+| Missing kernel on XPU | Enable anyway, document limitation, reference issue |
+| XPU根本没实现功能 | Add skipXPUIf with clear message |
+
 ## Checklist Before Commit
 
 - [ ] CUDA test located and mapped to XPU naming (_cuda -> _xpu)
 - [ ] XPU test updated/created in third_party/torch-xpu-ops/test/xpu/
+- [ ] `dtypesIfXPU` import verified
+- [ ] @dtypesIfXPU aligned with CUDA @dtypesIfCUDA
 - [ ] Test runs in pytorch_opencode_env conda environment
 - [ ] Test discovery verified (--collect-only)
-- [ ] Failure analyzed (if any)
+- [ ] Failure analyzed: Is it missing dtypes, XPU limitation, or a bug?
 - [ ] Intel torch-xpu-ops issues checked for similar cases
 - [ ] Solution implemented and test re-run
+- [ ] Known limitations documented with issue references
 - [ ] Atomic commit created
 - [ ] PR description prepared (if upstream contribution)
 
@@ -377,8 +520,10 @@ TestNameClass.test_method = _xpu_test_method
 - Editing existing tests in third_party/torch-xpu-ops/test/xpu/
 - Running tests in pytorch_opencode_env conda environment
 - Analyzing and resolving missing test discovery
+- Aligning XPU @dtypesIfXPU decorators with CUDA @dtypesIfCUDA pattern
 - Enabling tests with known limitations tracked via intel/torch-xpu-ops issues
 - Restarting unsupported backends (like CUDNN_ATTENTION) for tracking
+- Handling nestedtensor/SDPA tests with XPU-specific constraints
 
 **This skill does NOT cover:**
 - C++ kernel implementation
