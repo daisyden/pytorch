@@ -375,6 +375,15 @@ grep "FAILED" /home/daisydeng/daisy_pytorch/test_<module>_xpu_failures.txt | cut
 done
 ```
 
+**IMPORTANT: PR Submission Rules**
+- Clone fresh from `intel/torch-xpu-ops` origin/main before creating PR
+- Ask user to provide specific commit range (e.g., `start_hash...end_hash`) before submission
+- Create separate PRs for distinct purposes; do not mix unrelated commits
+- Maintain folder structure mapping: `test/xpu/<source_subdir>/` mirrors `test/<source_subdir>/`
+  - `test/dynamo/` → `test/xpu/dynamo/`
+  - `test/functorch/` → `test/xpu/functorch/`
+  - `test/nn/` → `test/xpu/nn/`
+
 ### Phase B7: Commit Changes
 
 #### Step B7.1: Stage and Commit
