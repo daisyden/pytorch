@@ -412,11 +412,73 @@ git log --oneline -2
 
 ## Common Issues and Fixes Reference
 
+### Import Failure Fixes (Deep Analysis Approach)
+
+When encountering ImportError or NameError during test collection, apply deep analysis:
+
+**Step 1: Identify the missing import**
+```bash
+# Check test collection error to identify missing import
+python -m pytest test/<module>.py --collect-only 2>&1 | grep "ImportError\|NameError"
+```
+
+**Step 2: Check original pytorch test folder for pattern**
+```bash
+# Look at the original test file in pytorch/test/<subdir>/
+ls -la pytorch/test/<subdir>/
+
+# Check how other pytorch tests in same folder define missing utilities
+grep -n "def requires_gpu\|requires_gpu =" pytorch/test/<subdir>/*.py | head -10
+```
+
+**Step 3: Check existing xpu tests for reference**
+```bash
+# See how existing xpu tests handle similar imports
+cat third_party/torch-xpu-ops/test/xpu/<subdir>/test_<other>_xpu.py | head -30
+```
+
+**Common patterns found through analysis:**
+
+| Missing Import | How to Fix |
+|----------------|------------|
+| `requires_cuda`, `requires_gpu` | Define locally using `torch.cuda.is_available()` or `torch.xpu.is_available()` |
+| `test_functions` (cross-file dependency) | Add `PYTORCH_TEST_PATH` pointing to pytorch test source folder if file uses relative imports |
+| `requires_gpu_and_triton` | Import from `torch.testing._internal.triton_utils` |
+
+**Example: Defining local requires_gpu**
+```python
+# From pytorch/test/dynamo/test_logging.py pattern
+import torch
+import unittest
+
+requires_gpu = unittest.skipUnless(
+    torch.cuda.is_available() or (hasattr(torch, 'xpu') and torch.xpu.is_available()),
+    "requires cuda or xpu"
+)
+```
+
+**Example: Cross-file dependency (when original uses `from . import test_functions`)**
+```python
+# Add path to pytorch test source
+from pathlib import Path
+import sys
+
+PYTORCH_TEST_PATH = str(Path(__file__).resolve().parents[5] / "test" / "dynamo")
+if PYTORCH_TEST_PATH not in sys.path:
+    sys.path.insert(0, PYTORCH_TEST_PATH)
+
+# Then import the module
+from test_functions import *
+```
+
+**Rule**: Always prefer defining utilities locally over depending on missing pytorch utilities. Only use path manipulation when original test truly depends on sibling modules.
+
 | Issue | Symptom | Fix |
-|-------|---------|-----|
+|-------|---------|---|
 | ACCELERATOR_TYPE missing | `ImportError: cannot import name 'ACCELERATOR_TYPE'` | Add local `_get_accelerator_type()` function |
 | onlyAccelerator missing | `NameError: name 'onlyAccelerator' is not defined` | Add `onlyAccelerator = lambda func: func` |
 | onlyXPU available | `NameError: name 'onlyXPU' is not defined` | Import `onlyXPU` from common_device_type |
+| requires_cuda/requires_gpu missing | `NameError: name 'requires_gpu' is not defined` | Define locally using `torch.cuda.is_available()` or `torch.xpu.is_available()` |
 | Broken import continuation | `SyntaxError: trailing comma` | Remove orphan commas |
 | Device type mismatch | `NameError: name 'device' is not defined` | Use proper device parameter |
 | File ends with execute code | No tests collected | Remove `if __name__` block or restructure instantiation |

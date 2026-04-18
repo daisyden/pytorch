@@ -393,6 +393,62 @@ if TEST_XPU and SDPBackend.UNSUPPORTED not in PLATFORM_LIST:
 #     raise unittest.SkipTest("...")  # REMOVE this
 ```
 
+### Issue 4: Import Errors After Copying
+
+**Symptom:** `ImportError` or `NameError` during test collection after copy
+
+**Root cause analysis path:**
+1. Check pytorch source test folder for same import:
+   ```bash
+   ls pytorch/test/<subdir>/test_*.py | head -10
+   grep "def requires_gpu\|requires_gpu =" pytorch/test/<subdir>/*.py | head -10
+   ```
+2. Check existing xpu tests in same folder for reference:
+   ```bash
+   head -30 test/xpu/<subdir>/test_<other>_xpu.py
+   ```
+
+**Common patterns and fixes:**
+
+#### Pattern: Missing requires_cuda/requires_gpu
+Original pytorch may use these but they may not be available in installed torch.
+
+**Fix:** Define locally using device availability:
+```python
+import torch
+import unittest
+
+# Define requires_gpu locally (not available in installed pytorch)
+requires_gpu = unittest.skipUnless(
+    torch.cuda.is_available() or (hasattr(torch, 'xpu') and torch.xpu.is_available()),
+    "requires cuda or xpu"
+)
+```
+
+#### Pattern: Cross-file imports (from . import sibling_module)
+When source test imports sibling modules with relative imports.
+
+**Fix:** Add path to pytorch test source folder:
+```python
+from pathlib import Path
+import sys
+
+# Path: test/xpu/dynamo/file.py -> test/dynamo/ is 5 levels up
+PYTORCH_TEST_PATH = str(Path(__file__).resolve().parents[5] / "test" / "dynamo")
+if PYTORCH_TEST_PATH not in sys.path:
+    sys.path.insert(0, PYTORCH_TEST_PATH)
+
+from test_functions import *  # Now will find pytorch source
+```
+
+**Rule**: Use `parents[5]` for `test/xpu/<subdir>/` to reach `test/<subdir>/` in pytorch.
+
+#### Pattern: requires_gpu_and_triton
+Use from triton_utils if available:
+```python
+from torch.testing._internal.triton_utils import requires_gpu_and_triton
+```
+
 ## Template Outline
 
 ### For Direct Copy Test
