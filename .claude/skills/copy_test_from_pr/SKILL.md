@@ -50,21 +50,45 @@ Task(tool="explore", description="...", prompt="...")
 | `bash + wc` | Count lines and analyze structure | `wc -l file.py` |
 | `bash + sed` | Extract sections by line numbers | `sed -n 'start,end p' file.py` |
 
-## Working Logic - Deep Analysis Approach
+## Scenario Determination
+
+Before starting, determine which scenario applies:
+
+### Scenario A: Existing _xpu Test File Exists
+- Target file `test_<module>_xpu.py` already exists in `torch-xpu-ops/test/xpu/`
+- Need to COPY specific class(es) from PR into existing target
+- Follow **Scenario A Workflow** below
+
+### Scenario B: No _xpu Test File Exists
+- Source file `test/<module>.py` has NO counterpart `test_<module>_xpu.py` in `torch-xpu-ops/test/xpu/`
+- Need to CREATE new file by copying entire PR file and adapting
+- Follow **Scenario B Workflow** below
+
+### How to Determine Scenario
+```bash
+# Check if _xpu version exists
+SOURCE_MODULE="nn"  # or other module name
+ls -la /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_${SOURCE_MODULE}_xpu.py 2>/dev/null && echo "Scenario A" || echo "Scenario B"
+```
+
+---
+
+## Scenario A: Copy Class into Existing _xpu File
 
 ### Phase 1: Deep Source Analysis
 
 #### Step 1.1: Download Source File
 ```bash
 # Download from PR branch
-BRANCH_NAME="daisyden/test_nn_stage1"
-curl -sL "https://raw.githubusercontent.com/daisyden/pytorch/$BRANCH_NAME/test/test_nn.py" -o /tmp/source_test.py
+BRANCH_NAME="<pr_branch_name>"
+SOURCE_FILE="test_<module>.py"  # e.g., test_nn.py
+curl -sL "https://raw.githubusercontent.com/daisyden/pytorch/$BRANCH_NAME/test/$SOURCE_FILE" -o /tmp/source_test.py
 wc -l /tmp/source_test.py
 ```
 
 #### Step 1.2: Analyze Class Structure with Explore Agent
 ```bash
-Task(tool="explore", description="Analyze test_nn class structure", 
+Task(tool="explore", description="Analyze source class structure", 
 prompt="""Analyze the file /tmp/source_test.py thoroughly.
 
 Find and report:
@@ -76,78 +100,26 @@ Find and report:
    - Helper functions defined within/near the class
 3. Import statements and their line numbers
 4. Any @onlyAccelerator or @deviceDecorator usage
-5. Look for energy_aware_test, skipCUDAIf, or other test decorators
-6. Find instantiate_device_type_tests() calls and their parameters
-7. Check for any conditional test definitions (if TEST_XPU:, etc.)
+5. Find instantiate_device_type_tests() calls and their parameters
 
 Return a structured report with all findings.""",
 subagent_type="explore")
 ```
 
-#### Step 1.3: Identify Test Class Dependencies
-```bash
-# Use explore agent to identify all imports and decorators
-Task(tool="explore", description="Analyze imports and dependencies",
-prompt="""Deep analysis of /tmp/source_test.py for all dependencies.
-
-1. Find ALL import statements and categorize them:
-   - Standard library imports (os, sys, unittest, etc.)
-   - torch imports
-   - testing._internal imports
-   - Third-party imports (hypothesis, scipy, numpy)
-
-2. For each import category, identify:
-   - Specific names/objects imported
-   - Whether they're used in the target test class
-   - Potential compatibility issues with installed PyTorch
-
-3. Check for decorator usage:
-   - @given, @parametrize, @onlyCPU, @onlyCUDA, @onlyXPU
-   - @xfail, @skipIf for platform-specific skipping
-   - Custom decorators
-
-4. Find function definitions outside classes:
-   - Helper functions used by tests
-   - Module-level setup/teardown functions
-   
-Return organized findings with specific line numbers.""",
-subagent_type="explore")
-```
-
 ### Phase 2: Analyze Target File Existing Structure
 
-#### Step 2.1: Check Target File Class Structure
+#### Step 2.1: Check Target File Structure
 ```bash
-# Use explore agent to understand existing target
 Task(tool="explore", description="Analyze target XPU test structure",
-prompt="""Analyze /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py
+prompt="""Analyze /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py
 
 Find and report:
 1. All current class definitions
 2. Existing import structure (lines 1-100)
 3. Test instantiation at end of file
 4. Any existing onlyAccelerator or device-specific handling
-5. Skip/test configuration at end of file
-6. Check for any TestNN or similar class already present
 
 Return detailed findings for modification planning.""",
-subagent_type="explore")
-```
-
-#### Step 2.2: Identify Insertion Points
-```bash
-# Deep scan for patterns
-Task(tool="explore", description="Find insertion points and patterns",
-prompt="""Analyze /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py
-
-Find:
-1. Line number where "class TestFusionEval" or similar class begins
-2. All instantiate_device_type_tests() calls and their parameters
-3. Pattern of device type suffixes (_cpu, _xpu, _cuda)
-4. Any existing skip decorators or xfail patterns
-5. Structure of if __name__ == "__main__": block
-
-Return precise line numbers and context for each finding.""",
 subagent_type="explore")
 ```
 
@@ -155,26 +127,18 @@ subagent_type="explore")
 
 #### Step 3.1: Determine Exact Class Boundaries
 ```bash
-# Use explore findings to set exact boundaries
-# Example for test_nn.py TestNN class:
-# - Start: grep -n "class TestNN(NNTestCase):" | cut -d: -f1
-# - End: grep -n "^class TestNNDeviceType" | head -1 | cut -d: -f1
+# Use explore findings or grep to identify exact boundaries
+CLASS_NAME="TestNN"
+grep -n "^class ${CLASS_NAME}(" /tmp/source_test.py | head -1
+grep -n "^class " /tmp/source_test.py | head -5  # Find next class
 ```
 
 #### Step 3.2: Extract with Verification
 ```bash
 # Extract class definition
-LINE_START=83
-LINE_END=8147
+LINE_START=<start_line>
+LINE_END=<end_line>
 sed -n "${LINE_START},${LINE_END}p" /tmp/source_test.py > /tmp/extracted_class.py
-
-# Verify structure
-python3 -c "
-content = open('/tmp/extracted_class.py').read()
-print(f'Lines: {len(content.splitlines())}')
-print(f'Starts with class: {content.startswith(\"class \")}')
-print(f'Has class end: {\"class TestNNDeviceType\" in content}')
-"
 ```
 
 ### Phase 4: Copy and Adapt Source to Target
@@ -182,66 +146,116 @@ print(f'Has class end: {\"class TestNNDeviceType\" in content}')
 #### Step 4.1: Insert Class into Target
 ```python
 # Python script for safe insertion
-with open('third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py', 'r') as f:
+with open('third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py', 'r') as f:
     target_content = f.read()
 
 with open('/tmp/extracted_class.py', 'r') as f:
     source_class = f.read()
 
-# Find insertion point (before class TestFusionEval)
-INSERT_MARKER = 'class TestFusionEval(TestCase):'
+# Find insertion point (before first existing class definition)
+INSERT_MARKER = '<existing_class_marker>'
 insert_pos = target_content.find(INSERT_MARKER)
+new_content = target_content[:insert_pos] + source_class + '\n\n' + target_content[insert_pos:]
 
-if insert_pos != -1:
-    new_content = target_content[:insert_pos] + source_class + '\n\n' + target_content[insert_pos:]
-else:
-    # Alternative: insert before instantiate_device_type_tests
-    INSTANTIATE_MARKER = 'instantiate_device_type_tests(TestNNDeviceType'
-    insert_pos = target_content.find(INSTANTIATE_MARKER)
-    new_content = target_content[:insert_pos] + source_class + '\n\n' + target_content[insert_pos:]
-
-with open('third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py', 'w') as f:
+with open('third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py', 'w') as f:
     f.write(new_content)
-print('Class inserted successfully')
 ```
 
-#### Step 4.2: Deep Import Analysis and Fixes
+#### Step 4.2: Apply Import Fixes (See Common Issues Section)
 
-##### Analysis: Check Available Imports in Installed PyTorch
+### Phase 5: Verify and Add Instantiations
+
+#### Step 5.1: Verify Syntax with AST
 ```bash
-# Analyze AND fix missing imports
-python3 << 'EOF'
-import subprocess
-import sys
-
-# Check what constants are available
-checks = {
-    'ACCELERATOR_TYPE': "from torch.testing._internal.common_utils import ACCELERATOR_TYPE",
-    'onlyAccelerator': "from torch.testing._internal.common_device_type import onlyAccelerator"
-}
-
-for name, import_stmt in checks.items():
-    try:
-        exec(compile(import_stmt, '<string>', 'exec'), {'__builtins__': __builtins__})
-        print(f"✓ {name}: AVAILABLE")
-    except (ImportError, NameError, AttributeError) as e:
-        print(f"✗ {name}: NOT AVAILABLE - {e}")
-        print(f"  Workaround needed: Define locally")
-EOF
+python3 -c "import ast; ast.parse(open('third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py').read()); print('Syntax OK')"
 ```
 
-##### Fix Strategy by Import Type
-
-**Type 1: Constants/Variables from common_utils**
+#### Step 5.2: Add XPU Test Instantiation
 ```python
-# Problem: ACCELERATOR_TYPE, TEST_ACCELERATOR might not exist
-# Solution: Add local definition after AMPERE_OR_ROCM
-'''
-# Local definitions for XPU compatibility
-_MARKER_ = "AMPERE_OR_ROCM = TEST_WITH_ROCM or torch.cuda.is_tf32_supported()"
+# Add allow_xpu=True to instantiation
+content = content.replace(
+    'instantiate_device_type_tests(TestNN, globals()',
+    'instantiate_device_type_tests(TestNN, globals(), allow_xpu=True'
+)
+```
 
-_REPLACEMENT_ = """AMPERE_OR_ROCM = TEST_WITH_ROCM or torch.cuda.is_tf32_supported()
+### Phase 6-9: Verify Tests, Run, Check Issues, Document
+Follow remaining phases from Verification onward.
 
+---
+
+## Scenario B: Create New _xpu File from Scratch
+
+When no `_xpu` counterpart exists, create an entire new test file.
+
+### Phase B1: Setup and Download
+
+#### Step B1.1: Determine Target Path
+```bash
+SOURCE_MODULE="nn"  # e.g., "nn" from test/test_nn.py
+TARGET_DIR="/home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu"
+TARGET_FILE="${TARGET_DIR}/test_${SOURCE_MODULE}_xpu.py"
+
+# Verify directory exists
+ls -la "${TARGET_DIR}/" 2>/dev/null | head -10
+```
+
+#### Step B1.2: Download Source File
+```bash
+BRANCH_NAME="<pr_branch_name>"
+SOURCE_FILE="test_${SOURCE_MODULE}.py"
+curl -sL "https://raw.githubusercontent.com/daisyden/pytorch/$BRANCH_NAME/test/$SOURCE_FILE" -o /tmp/full_source_test.py
+wc -l /tmp/full_source_test.py
+```
+
+#### Step B1.3: Deep Analyze Full Source File
+```bash
+Task(tool="explore", description="Full source file analysis",
+prompt="""Complete deep analysis of /tmp/full_source_test.py
+
+1. Structure Analysis:
+   - Total line count
+   - All import statements with line numbers
+   - All class definitions with boundaries
+   - All decorator usage (@onlyCPU, @onlyCUDA, @given, etc.)
+   - Instantiate_device_type_tests() calls
+
+2. XPU Compatibility Analysis:
+   - Identify all CUDA-specific decorators/imports
+   - Find all TEST_CUDA conditional code
+   - Check for CUDA-only kernel usages
+   - Identify bfloat16/float16 precision tests
+
+3. Required Modifications List:
+   - Imports that need local definitions
+   - Decorators needing XPU equivalents
+   - Conditional code needing XPU handling
+
+Return comprehensive findings for complete porting.""",
+subagent_type="explore")
+```
+
+### Phase B2: Create Adapted Copy
+
+#### Step B2.1: Create Target File from Source
+```python
+# Read full source
+with open('/tmp/full_source_test.py', 'r') as f:
+    content = f.read()
+
+# Remove ACCELERATOR_TYPE from import if present
+content = content.replace(', ACCELERATOR_TYPE', '')
+
+# Remove onlyAccelerator from import if present
+content = content.replace(', onlyAccelerator', '')
+content = content.replace('onlyAccelerator', '')
+
+# Fix double commas
+content = content.replace(',,', ',')
+
+# Add local definitions after load_tests line
+INSERT_MARKER = 'load_tests = load_tests  # noqa: PLW0127\n'
+LOCAL_DEFS = '''
 # Local ACCELERATOR_TYPE for XPU compatibility
 def _get_accelerator_type():
     if torch.xpu.is_available():
@@ -254,231 +268,138 @@ def _get_accelerator_type():
         return "cpu"
 
 ACCELERATOR_TYPE = _get_accelerator_type()
-"""
 
-# Apply fix
-content = content.replace(_MARKER_, _REPLACEMENT_)
-```
-
-**Type 2: Device Decorators from common_device_type**
-```python
-# Problem: onlyAccelerator may not be available
-# Solution: Add identity decorator after imports
-'''
-_MARKER_ = ")  # end of from torch.testing imports"
-
-_REPLACEMENT_ = """)
-# onlyAccelerator for XPU - identity pass-through since it's not exported
+# onlyAccelerator decorator for XPU - simplified pass-through
 onlyAccelerator = lambda func: func
-"""
 
-# Apply fix
-content = content.replace(_MARKER_, _REPLACEMENT_)
-```
-
-**Type 3: Broken Import Statements**
-```bash
-# Find and fix broken multi-line imports
-# Common pattern: missing items with onlyAccelerator excised
-
-# Find broken patterns
-grep -n "onlyNativeDeviceTypes,,\|""," /tmp/target.py | head -10
-
-# Fix with precise edit
-edit file.py --oldString "get_all_device_types,\n\nfrom hypothesis" --newString "get_all_device_types\n\nfrom hypothesis"
-```
-
-**Type 4: Import Adaptation for XPU-Specific Tests**
-```python
-# Problem: # devices may be CUDA-specific
-# Solution: Add XPU equivalents or use identity pass-through
 '''
-# Original
-@onlyCUDA
-
-# Adapted for XPU
-@onlyXPU  # or use @deviceDecorator("xpu") if available
-'''
+content = content.replace(INSERT_MARKER, INSERT_MARKER + LOCAL_DEFS)
 ```
 
-### Phase 5: Verify and Add Instantiations
-
-#### Step 5.1: Verify Syntax with AST
-```bash
-python3 -c "
-import ast
-try:
-    with open('third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py') as f:
-        ast.parse(f.read())
-    print('Syntax: VALID')
-except SyntaxError as e:
-    print(f'Syntax Error at line {e.lineno}: {e.msg}')
-    with open('third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py') as f:
-        lines = f.readlines()
-    if e.lineno:
-        print(f'Problem line: {lines[e.lineno-1].strip()[:80]}')
-"
-```
-
-#### Step 5.2: Add XPU Test Instantiation
+#### Step B2.2: Fix Root-Level Instantiation
 ```python
-# Find and update instantiation block
-# Look for: instantiate_device_type_tests(TestNNDeviceType, globals(), allow_mps=True)
+# Find and update instantiation section
+OLD_INSTANTIATE = '''instantiate_device_type_tests(TestNNDeviceType, globals(), allow_mps=True)
 
-_OLD_INSTANTIATE_ = '''instantiate_device_type_tests(
-    TestNNDeviceType, globals(), allow_mps=True
-)
+device_list = None
+
+# # https://github.com/pytorch/pytorch/issues/177119
+# if os.environ.get('PYTORCH_TEST_WITH_DYNAMO', '0') == '1':
+#     device_list = ('cpu', )
+
 instantiate_device_type_tests(TestNN, globals(), except_for=device_list)'''
 
-_NEW_INSTANTIATE_ = '''instantiate_device_type_tests(
+NEW_INSTANTIATE = '''instantiate_device_type_tests(
     TestNNDeviceType, globals(), allow_mps=True, allow_xpu=True
 )
 instantiate_device_type_tests(TestNN, globals(), allow_xpu=True)'''
 
-content = content.replace(_OLD_INSTANTIATE_, _NEW_INSTANTIATE_)
+content = content.replace(OLD_INSTANTIATE, NEW_INSTANTIATE)
 ```
 
-### Phase 6: Test Collection and Validation
+#### Step B2.3: Write Adapted Source to Target
+```python
+# Write adapted content to target
+TARGET_PATH = '/home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py'
+with open(TARGET_PATH, 'w') as f:
+    f.write(content)
+print(f'Created {TARGET_PATH}')
+```
 
-#### Step 6.1: Collect Tests (Run from /tmp to avoid local torch)
+### Phase B3: Verify File Creation
+
+#### Step B3.1: Syntax Verification
 ```bash
+python3 -c "import ast; ast.parse(open('/home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py').read()); print('Syntax OK')"
+```
+
+#### Step B3.2: Test Collection
+```bash
+cd /tmp  # Run from /tmp to avoid local torch
 export PATH="/home/daisydeng/miniforge3/bin:$PATH"
 eval "$(/home/daisydeng/miniforge3/bin/conda shell.bash hook)"
 conda activate pytorch_opencode_env
-cd /tmp
 
-# Collect tests
-python3 -m pytest /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py --collect-only 2>&1 | head -50
-
-# Check for errors
-python3 -m pytest /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py --collect-only 2>&1 | grep -E "ERROR|error|FAILED"
+python3 -m pytest /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py --collect-only 2>&1 | head -30
 ```
 
-#### Step 6.2: Diagnose Collection Errors
+### Phase B4: Fix Collection Errors
 ```bash
-# Parse errors with explore agent
-Task(tool="explore", description="Diagnose test collection errors",
-prompt="""Diagnose the pytest collection error from:
-PATH: /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py
+# Diagnose any errors
+python3 -m pytest /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py --collect-only 2>&1 | grep -E "ERROR|NameError|ImportError"
 
-Look for:
-1. Missing import names
-2. Syntax errors in import statements
-3. Broken function/class definitions
-4. Duplicate definitions
-5. Indentation issues
-6. String/multi-line string problems
+# Fix using explore agent
+Task(tool="explore", description="Fix collection errors",
+prompt="""Fix the pytest collection errors in:
+/home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py
 
-Review the file structure and provide specific fixes needed.""",
+1. Identify all missing imports
+2. Find broken multi-line import statements
+3. Check for syntax errors
+
+Apply necessary fixes and verify.""",
 subagent_type="explore")
 ```
 
-### Phase 7: Run Tests and Record Results
+### Phase B5: Run Tests
 
-#### Step 7.1: Run Specific Test Class
+#### Step B5.1: Run All Tests in New File
 ```bash
-export PATH="/home/daisydeng/miniforge3/bin:$PATH"
-eval "$(/home/daisydeng/miniforge3/bin/conda shell.bash hook)"
-conda activate pytorch_opencode_env
 cd /tmp
-
 export PYTEST_ADDOPTS="-n 1 --timeout=60"
 
-# Run TestNN class tests only
 timeout 600 python3 -m pytest \
-    /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py::TestNN \
-    -v --tb=short 2>&1 > /tmp/test_results.txt
+    /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py \
+    -v --tb=short 2>&1 > /tmp/test_<module>_xpu_results.txt
 
 # Extract summary
-tail -30 /tmp/test_results.txt
+tail -30 /tmp/test_<module>_xpu_results.txt
 
 # Extract failures
-grep "FAILED" /tmp/test_results.txt | head -20
-
-# Show pass/fail counts
-grep -E "^=.*=.*$" /tmp/test_results.txt | tail -3
+grep "FAILED" /tmp/test_<module>_xpu_results.txt | head -30
 ```
 
-#### Step 7.2: Record Results
+#### Step B5.2: Record Results
 ```bash
-# Copy results to workspace
-cp /tmp/test_results.txt /home/daisydeng/daisy_pytorch/test_nn_xpu_failures.txt
+cp /tmp/test_<module>_xpu_results.txt /home/daisydeng/daisy_pytorch/test_<module>_xpu_failures.txt
 ```
 
-### Phase 8: Check Known Issues
+### Phase B6: Check Known Issues
 
-#### Step 8.1: Search for Specific Test Failures in GitHub
+#### Step B6.1: Search GitHub for Each Failure
 ```bash
-# For each failed test, search exactly:
-FAILED_TESTS="test_batchnorm_2D_train_NCHW_vs_cpu_mixed_bfloat16"
-
-for test in $FAILED_TESTS; do
-    echo "=== Searching: $test ==="
-    curl -s "https://api.github.com/search/issues?q=repo:intel/torch-xpu-ops+$(echo $test | sed 's/ /+/g')+is:issue+state:open&per_page=5" | \
-    python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    if data.get('total_count', 0) > 0:
-        for item in data['items']:
-            print(f'  FOUND #{item[\"number\"]}: {item[\"title\"]}')
-    else:
-        print('  No open issue found')
-except: pass
-"
+grep "FAILED" /home/daisydeng/daisy_pytorch/test_<module>_xpu_failures.txt | cut -d: -f4 | cut -d_ -f1-5 | sort -u | while read test; do
+    echo "=== Checking: $test ==="
+    curl -s "https://api.github.com/search/issues?q=repo:intel/torch-xpu-ops+$test+is:issue+state:open&per_page=3" | \
+    python3 -c "import sys,json; d=json.load(sys.stdin); print('  Found:', d['total_count'], 'open issues') if d.get('total_count',0)>0 else print('  No open issue')" 2>/dev/null
 done
 ```
 
-#### Step 8.2: Check Skip Lists
+### Phase B7: Commit Changes
+
+#### Step B7.1: Stage and Commit
 ```bash
-# Check if known issues are in skip lists
-grep -r "test_batchnorm\|test_cosine\|test_upsampling\|test_interpolate" \
-    /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/skip_list*.py 2>/dev/null
+cd /home/daisydeng/daisy_pytorch
+
+# Add file to git (if tracking separate test repo)
+git add third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py
+
+# Or if using separate torch-xpu-ops git:
+cd /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops
+git add test/xpu/test_<module>_xpu.py
+git commit -m "Add test_<module>_xpu.py: Port test_<module>.py to XPU backend
+
+- Ported test classes from pytorch PR branch
+- Added local ACCELERATOR_TYPE and onlyAccelerator definitions
+- Enabled XPU device tests with allow_xpu=True
+- Updated test instantiation structure
+
+Authored with Claude."
+
+git log --oneline -2
 ```
 
-### Phase 9: Document Results
-
-#### Step 9.1: Save Failure Analysis
-```bash
-# Create summary document
-cat > /home/daisydeng/daisy_pytorch/test_porting_summary.md << 'EOF'
-# Test Porting Summary
-
-## Source Information
-- PR Branch: daisyden/test_nn_stage1
-- Source File: test/test_nn.py
-- Target File: third_party/torch-xpu-ops/test/xpu/test_nn_xpu.py
-- Date: $(date +%Y-%m-%d)
-
-## Tests Ported
-- TestNN (NNTestCase base class with all parametrized tests)
-
-## Issues Encountered
-1. ACCELERATOR_TYPE - Not in installed PyTorch (added local definition)
-2. onlyAccelerator - Not exported (added identity function)
-3. Import continuation issues (fixed manually)
-
-## Test Results
-- 627 passed
-- 7 failed (listed below)
-- 422 skipped
-- 3 xfailed
-
-## Failed Tests (Not in Known Issues)
-| Test Name | Issue Search |
-|-----------|--------------|
-| test_batchnorm_2D_train_NCHW_vs_cpu_mixed_bfloat16_xpu_bfloat16 | Not found |
-| test_cosine_similarity_mixed_precision_xpu | Not found |
-| test_interpolate_buffer_overflow_xpu | Not found |
-| test_upsampling_bfloat16_xpu | Not found |
-
-## Recommendations
-1. Create GitHub issues for untracked failures
-2. Consider skipping known precision-sensitive tests
-3. Monitor XPU kernel improvements for bfloat16 support
-
-EOF
-```
+---
 
 ## Common Issues and Fixes Reference
 
@@ -487,33 +408,49 @@ EOF
 | ACCELERATOR_TYPE missing | `ImportError: cannot import name 'ACCELERATOR_TYPE'` | Add local `_get_accelerator_type()` function |
 | onlyAccelerator missing | `NameError: name 'onlyAccelerator' is not defined` | Add `onlyAccelerator = lambda func: func` |
 | onlyXPU available | `NameError: name 'onlyXPU' is not defined` | Import `onlyXPU` from common_device_type |
-| Broken import continuation | `SyntaxError: trailing comma` | Remove orphan commas or add missing items |
-| Device type mismatch | `NameError: name 'device' is not defined` | Use proper device parameter or globals() |
-| Tensor type not available | `AssertionError: Tensor-likes are not close` | Adjust precision tolerances |
+| Broken import continuation | `SyntaxError: trailing comma` | Remove orphan commas |
+| Device type mismatch | `NameError: name 'device' is not defined` | Use proper device parameter |
+| File ends with execute code | No tests collected | Remove `if __name__` block or restructure instantiation |
 
 ## Validation Checklist
 
-- [ ] Source class boundaries correctly identified
+- [ ] Source file correctly identified
+- [ ] Scenario determined (A or B)
 - [ ] All imports analyzed for compatibility
 - [ ] Missing imports have local workarounds
 - [ ] Python syntax validated with AST
 - [ ] Test collection succeeds (0 errors)
-- [ ] XPU instantiation added
+- [ ] XPU instantiation added (allow_xpu=True)
 - [ ] Tests run to completion
 - [ ] Failures recorded and analyzed
 - [ ] Known issues searched in GitHub
 - [ ] Results documented
+- [ ] File committed (if applicable git tracking)
+
+## Working Logic Summary
+
+### Scenario A (Existing _xpu File):
+1. Download source → Analyze class boundaries
+2. Extract specific class → Insert into existing target
+3. Apply import fixes → Add XPU instantiation
+4. Verify syntax → Run tests → Check issues → Document
+
+### Scenario B (New _xpu File):
+1. Download full source → Deep analyze entire file
+2. Create adapted copy (remove/add local definitions)
+3. Fix instantiation → Write to target path
+4. Verify syntax → Fix any collection errors
+5. Run all tests → Check known issues → Commit
 
 ## Generic Application
 
-This procedure applies to ANY test class porting:
+This procedure applies to ANY test class/file porting:
 
-1. **Identify Source**: Locate test class in PyTorch PR branch
-2. **Analyze with Explore Agent**: Get deep understanding of structure
-3. **Find Target Insertion Point**: Understand existing target structure
-4. **Extract with Verification**: Use sed/awk for precise extraction
-5. **Adapt Imports**: For each missing import, apply appropriate workaround
-6. **Add XPU Support**: Include `allow_xpu=True` in instantiation
-7. **Verify**: Test collection before running
-8. **Run and Document**: Execute tests and record failures
-9. **Check Known Issues**: Search GitHub with exact test names
+1. **Scenario Detection**: Check if `_xpu` version exists
+2. **Analyze**: Use explore agent for deep understanding
+3. **Adapt**: For each missing import, apply appropriate workaround
+4. **Support**: Include `allow_xpu=True` in all instantiations
+5. **Verify**: Test collection before running
+6. **Run and Document**: Execute tests and record failures
+7. **Check Known Issues**: Search GitHub with exact test names
+8. **Commit**: Stage and commit to appropriate repository
