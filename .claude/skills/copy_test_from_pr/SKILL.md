@@ -345,18 +345,18 @@ subagent_type="explore")
 
 #### Step B5.1: Run All Tests in New File
 ```bash
-cd /tmp
-export PYTEST_ADDOPTS="-n 1 --timeout=60"
+# Activate pytorch conda environment
+source ~/miniforge3/bin/activate pytorch_opencode_env
 
-timeout 600 python3 -m pytest \
-    /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py \
-    -v --tb=short 2>&1 > /tmp/test_<module>_xpu_results.txt
+# Run from torch-xpu-ops test directory with junit output
+cd $HOME/daisy_pytorch/third_party/torch-xpu-ops/test/xpu
+pytest -v --junit-xml=test_<module>_xpu.xml dynamo/test_<module>_xpu.py
 
 # Extract summary
-tail -30 /tmp/test_<module>_xpu_results.txt
+tail -30 test_<module>_xpu.xml 2>/dev/null || pytest -v --tb=short dynamo/test_<module>_xpu.py 2>&1 | tail -30
 
 # Extract failures
-grep "FAILED" /tmp/test_<module>_xpu_results.txt | head -30
+grep "FAILED" test_<module>_xpu.xml 2>/dev/null || grep "FAILED" <<< "$(pytest -v --tb=no dynamo/test_<module>_xpu.py)" | head -30
 ```
 
 #### Step B5.2: Record Results
