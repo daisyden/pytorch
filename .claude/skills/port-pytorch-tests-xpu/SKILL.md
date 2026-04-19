@@ -114,20 +114,14 @@ If test does not exist:
 
 ```bash
 # Activate pytorch conda environment
-source ~/miniforge3/etc/profile.d/conda.sh
-conda activate pytorch_opencode_env
+source ~/miniforge3/bin/activate pytorch_opencode_env
 
-# Run from /tmp to avoid local import conflicts
-cd /tmp
+# Run from torch-xpu-ops test directory with junit output
+cd $HOME/daisy_pytorch/third_party/torch-xpu-ops/test/xpu
+pytest -v --junit-xml=test_<name>_xpu.xml dynamo/test_<name>_xpu.py
 
-# Set PYTHONPATH for test discovery
-export PYTHONPATH=$HOME/daisy_pytorch/test/functorch:/tmp
-
-# Copy test file to /tmp for isolated execution
-cp $HOME/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/functorch/test_vmap_xpu.py /tmp/
-
-# Run specific test
-python -m pytest test_vmap_xpu.py -k "test_name_xpu" -v --tb=short
+# For specific test filtering
+pytest -v --tb=short dynamo/test_<name>_xpu.py -k "test_pattern"
 ```
 
 ### Step 4: Analyze Why Test Does Not Run
