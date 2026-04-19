@@ -7,6 +7,16 @@ description: Port PyTorch CUDA test files to support Intel XPU backend testing. 
 
 This Skill provides a workflow for generalizing PyTorch CUDA-specific test files to support Intel XPU backend testing.
 
+## Skill Integration
+
+**This skill follows agent-guidelines AND extends it with specific constraints.**
+
+Always apply agent-guidelines rules including:
+- Mandatory post-write commit protocol (ask user before committing)
+- Deep semantic analysis instead of pattern matching
+- Atomic commits for each ported test
+- All constraints defined in agent-guidelines
+
 ## Tools Used in Workflow
 
 This skill relies on the following tools:

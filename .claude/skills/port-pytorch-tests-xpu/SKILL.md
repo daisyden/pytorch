@@ -7,6 +7,16 @@ description: Port PyTorch unit tests to torch-xpu-ops for XPU backend coverage. 
 
 This skill guides the porting of PyTorch unit tests to torch-xpu-ops repo for XPU backend coverage.
 
+## Skill Integration
+
+**This skill follows agent-guidelines AND extends it with specific constraints.**
+
+Always apply agent-guidelines rules including:
+- Mandatory post-write commit protocol (ask user before committing)
+- Deep semantic analysis instead of pattern matching
+- Atomic commits for each ported test
+- All constraints defined in agent-guidelines
+
 ## Related Skills
 - **agent-guidelines** (REQUIRED): Must be loaded first for behavior rules
 - **at-dispatch-v2**: For C++ kernel type dispatch work
