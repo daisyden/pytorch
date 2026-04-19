@@ -45,8 +45,33 @@ After EVERY code change, make a small, atomic git commit immediately:
 3. **DO NOT** amend, rebase, reset, or force push.
 4. **DO NOT** touch `.git`, `.gitignore`, or git config.
 5. **Show a brief diff before commit**.
+6. **MANDATORY: After any Write/Edit tool call that creates/modifies tracked files**
+   - IMMEDIATELY check git status
+   - Run `git add <file>` on modified files
+   - Run `git commit -m "description"`
+   - DO NOT proceed to next task until commit is done
 
-Example workflow:
+### Mandatory Post-Write Protocol
+
+**CRITICAL**: After using Write or Edit tools, you MUST execute this sequence:
+
+```bash
+# Step 1: Check what was modified
+git status -s
+
+# Step 2: If tracked files exist, commit immediately
+FILES=$(git status -s | grep "^[ M]" | awk '{print $2}')
+if [ -n "$FILES" ]; then
+    echo "Files modified that need commit: $FILES"
+    git add $FILES
+    git commit -m "Brief description of what changed"
+fi
+```
+
+### I Will Provide Examples After Each Unique Edit
+
+When committing complex changes, always provide context:
+
 ```bash
 # Make small change to file
 git diff file.py
@@ -54,7 +79,32 @@ git diff file.py
 # If change looks correct, commit immediately
 git add file.py
 git commit -m "Fix: short descriptive message of what changed"
+
+# For multi-file changes in same work session
+git add file1.py file2.py
+git commit -m "Implement: feature X with Y
+
+Changes:
+- Modified file1.py to add new function
+- Updated file2.py for compatibility
+
+Fixes: #1234"
 ```
+
+**What SHOULD trigger IMMEDIATE commit:**
+- Write tool creates new file
+- Edit tool modifies existing file
+- Multiple edits forming single logical change
+
+**What CAN be batched (only if same session):**
+- Multiple closely related edits (all part of one feature/bug fix)
+- Group commits ONLY for PR submission when requested otherwise
+
+**Enforcement Checklist:**
+- [ ] Any Write call → commit follows immediately
+- [ ] Any Edit call → commit follows immediately  
+- [ ] Verify with `git log -1 --oneline` after commit
+- [ ] Check `git status` is clean before next task
 
 ### Commit Message Style
 - Use imperative mood ("Add feature" not "Added feature")
