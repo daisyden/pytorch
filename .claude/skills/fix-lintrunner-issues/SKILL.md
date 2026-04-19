@@ -4,6 +4,16 @@
 
 Fix lint violations and apply formatting fixes to PyTorch XPU test files using lintrunner. Use when porting test cases, updating a PR, or fixing lint issues. The skill identifies, analyzes, and resolves lint errors ensuring code quality for Intel XPU backend tests.
 
+## Skill Integration
+
+**This skill follows agent-guidelines AND extends it with specific constraints.**
+
+Always apply agent-guidelines rules including:
+- Mandatory post-write commit protocol (ask user before committing)
+- Deep semantic analysis instead of pattern matching
+- Atomic commits for each fix
+- All constraints defined in agent-guidelines
+
 ## Preconditions
 
 Before starting, ensure:

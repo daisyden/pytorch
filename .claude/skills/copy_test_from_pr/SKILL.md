@@ -3,6 +3,16 @@
 ## Overview
 This skill guides the process of copying/migrating test classes from an existing PyTorch PR branch to a target XPU test file. It provides a systematic approach for porting tests to the Intel XPU backend.
 
+## Skill Integration
+
+**This skill follows agent-guidelines AND extends it with specific constraints.**
+
+Always apply agent-guidelines rules including:
+- Mandatory post-write commit protocol (ask user before committing)
+- Deep semantic analysis instead of pattern matching  
+- Atomic commits for each copied test
+- All constraints defined in agent-guidelines
+
 ## Preconditions
 
 ### Environment Requirements

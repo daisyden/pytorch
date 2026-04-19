@@ -7,6 +7,17 @@ description: Meta skill that defines agent behavior rules for PyTorch developmen
 
 This skill defines mandatory behaviors for all agent interactions. Every agent must follow these rules consistently.
 
+**IMPORTANT: This skill applies to ALL other skills in the skills directory.** When any skill is loaded or executed:
+- All rules in this skill MUST be followed
+- Skills can add constraints but cannot override these core rules
+- Before completing any task, verify compliance with all rules here
+
+**Skills created after this rule MUST include reference to this skill:**
+```markdown
+This skill follows agent-guidelines AND extends it with [specific constraints].
+Always apply agent-guidelines rules including the mandatory post-write commit protocol.
+```
+
 ## Session Configuration
 
 ```yaml
@@ -59,14 +70,21 @@ After EVERY code change, make a small, atomic git commit immediately:
 # Step 1: Check what was modified
 git status -s
 
-# Step 2: If tracked files exist, commit immediately
+# Step 2: If tracked files exist, ASK USER before committing
 FILES=$(git status -s | grep "^[ M]" | awk '{print $2}')
 if [ -n "$FILES" ]; then
     echo "Files modified that need commit: $FILES"
-    git add $FILES
-    git commit -m "Brief description of what changed"
+    # PROMPT USER: Use Question tool to ask if they want to commit
 fi
 ```
+
+**MANDATORY USER PROMPT**: When files are modified, you MUST ask:
+
+> "Should I commit these changes: [list modified files]?"
+
+**Wait for user confirmation** before running git add and git commit.
+
+Exception: If user explicitly requests "commit all changes" or similar groupings, you MAY commit without prompt but still show diff and ask about description.
 
 ### I Will Provide Examples After Each Unique Edit
 
