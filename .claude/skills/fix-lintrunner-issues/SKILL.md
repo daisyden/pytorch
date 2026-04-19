@@ -357,3 +357,175 @@ lintrunner init
 lintrunner -a $(git diff origin/main...HEAD --name-only --diff-filter=AM)
 git add -A && git commit -m "Lint fixes" && git push ${OWNER} HEAD:${BRANCH}
 ```
+
+## Deep Analysis for Complex Lint Issues
+
+When `lintrunner -a` cannot fix an issue, deep semantic analysis is required.
+
+### When Deep Analysis is Needed
+
+Apply deep analysis when:
+1. `lintrunner -a` reports errors that require code changes
+2. Tests use CUDA-specific APIs but need XPU compatibility
+3. Import statements need updating for XPU support
+4. Device-specific logic needs generalization
+5. Decorators need to be changed for XPU testing
+
+### Deep Analysis Decision Tree
+
+```
+1. WHAT: What does the error message say?
+   ↓
+2. WHERE: Which file and line is affected?
+   ↓
+3. WHY: Why was this code written this way?
+   ↓
+4. CONTEXT: Read 15-20 lines around the error
+   ↓
+5. CLASSIFY: Is this:
+   - A CUDA-only import that needs GPU_TYPE?
+   - A hard-coded device="cuda" that needs device=GPU_TYPE?
+   - A requires_cuda that needs requires_gpu_and_triton?
+   - An expected test that should skip on specific conditions?
+   ↓
+6. DECIDE: What is the minimal fix to make XPU-compatible?
+   ↓
+7. VERIFY: Check similar patterns in the codebase
+   ↓
+8. FIX: Apply targeted edit
+```
+
+### Common XPU Compatibility Patterns to Fix
+
+#### Pattern 1: CUDA-specific imports
+```python
+# BAD (CUDA-only)
+from torch.testing._internal.triton_utils import requires_cuda_and_triton
+from torch.testing._internal.common_cuda import requires_cuda
+
+# GOOD (XPU-compatible)
+from torch.testing._internal.inductor_utils import GPU_TYPE
+from torch.testing._internal.triton_utils import requires_gpu_and_triton
+```
+
+#### Pattern 2: Hard-coded device strings
+```python
+# BAD
+torch.Stream(device="cuda")
+x = torch.ones(2, 2, device="cuda")
+
+# GOOD
+torch.Stream(device=GPU_TYPE)
+x = torch.ones(2, 2, device=GPU_TYPE)
+```
+
+#### Pattern 3: Decorator changes
+```python
+# BAD
+@requires_cuda
+@requires_cuda_and_triton
+
+# GOOD
+@requires_gpu_and_triton
+```
+
+#### Pattern 4: Device module selection
+```python
+# BAD
+with torch.cuda.stream(s):
+    x = torch.sin(x)
+
+# GOOD
+device_module = torch.get_device_module(GPU_TYPE)
+with device_module.stream(s):
+    x = torch.sin(x)
+```
+
+#### Pattern 5: Backend-specific capability checks
+```python
+# BAD
+if not torch.cuda.is_bf16_supported():
+    raise unittest.SkipTest("requires bf16")
+
+# GOOD
+if GPU_TYPE == "cuda":
+    bf16_supported = torch.cuda.is_bf16_supported()
+elif GPU_TYPE == "xpu":
+    bf16_supported = getattr(torch.xpu, "is_bf16_supported", lambda: False)()
+else:
+    bf16_supported = False
+if not bf16_supported:
+    raise unittest.SkipTest("requires bf16")
+```
+
+#### Pattern 6: Event/class instantiation
+```python
+# BAD
+event = torch.cuda.Event() if torch.cuda.is_available() else torch.xpu.Event()
+
+# GOOD
+Event = torch.cuda.Event if torch.cuda.is_available() else torch.xpu.Event
+event = Event()
+```
+
+### Using Explore Subagent for Complex Analysis
+
+For complicated issues, use the explore agent:
+
+```bash
+Task(
+    description="Analyze XPU compatibility for test file",
+    prompt="""Analyze test/xpu/dynamo/test_streams_xpu.py for CUDA-specific patterns.
+
+Required analysis:
+1. Find all @requires_cuda decorators → change to @requires_gpu_and_triton
+2. Find device=\"cuda\" → change to device=GPU_TYPE
+3. Find requires_cuda import → add requires_gpu_and_triton import
+4. Check if GPU_TYPE is imported
+
+Return a summary of changes needed with file:line references.
+"""
+)
+```
+
+### Validating Fixes
+
+After applying deep analysis fixes:
+
+```bash
+# Verify no CUDA-specific hard-coded devices remain
+grep -n 'device="cuda"' test/xpu/dynamo/test_*.py
+
+# Verify correct imports exist
+grep -n 'GPU_TYPE\|requires_gpu_and_triton' test/xpu/dynamo/test_*.py
+
+# Run lintrunner to check for remaining issues
+lintrunner -a test/xpu/dynamo/test_*.py
+```
+
+### Example: Complete Deep Analysis Fix
+
+Copilot AI review identified test_ctx_manager_xpu.py issues:
+
+**Issue**: Uses `torch.cuda.device()` unconditionally, fails on XPU-only
+
+**Analysis**:
+```
+1. Read context at line 673 in test_ctx_manager_xpu.py
+2. Code: with torch.cuda.device(x.device.index - 1):
+3. Why: Setting device context for tensor operations
+4. Solution: Use torch.get_device_module(GPU_TYPE).device(...)
+```
+
+**Fix applied**:
+```python
+# BEFORE
+with torch.cuda.device(x.device.index - 1):
+    x = torch.sin(x + 1)
+
+# AFTER
+with torch.get_device_module(GPU_TYPE).device(x.device.index - 1):
+    x = torch.sin(x + 1)
+```
+
+**Verification**: Similar pattern found in other test functions - apply consistently.
