@@ -1,531 +1,403 @@
+---
+name: fix-lintrunner-issues
+description: Diagnose and fix lintrunner / preci-lint-check failures on PyTorch and torch-xpu-ops code. Accepts either a PR link (fetches the failing CI log) or a local folder / file path (runs the relevant adapters locally). Use when a PR's preci-lint-check job is failing, when asked to "fix lint issues" on a PR or a local path, or when porting tests triggers linter violations. Covers fetching CI logs via gh, reproducing failures locally even without lintrunner installed, and selecting the right fix strategy (code edit vs. noqa vs. `.lintrunner.toml` exclude) based on how the underlying adapter actually works.
+---
+
 # Fix Lintrunner Issues
-
-## Description
-
-Fix lint violations and apply formatting fixes to PyTorch XPU test files using lintrunner. Use when porting test cases, updating a PR, or fixing lint issues. The skill identifies, analyzes, and resolves lint errors ensuring code quality for Intel XPU backend tests.
 
 ## Skill Integration
 
-**This skill follows agent-guidelines AND extends it with specific constraints.**
+Follow `agent-guidelines` on top of this skill: deep semantic analysis over pattern matching, atomic commits, never commit without explicit user permission.
 
-Always apply agent-guidelines rules including:
-- Mandatory post-write commit protocol (ask user before committing)
-- Deep semantic analysis instead of pattern matching
-- Atomic commits for each fix
-- All constraints defined in agent-guidelines
+Per `AGENTS.md`: do not auto-install tooling. If `uv`, `lintrunner`, or the env is missing, **stop and ask the user** before running build/install commands. You can still do most of the diagnostic work without lintrunner — see Step 3B (adapter-only invocation) and Step 6 (verification).
 
-## Preconditions
+## Input Modes
 
-Before starting, ensure:
-1. Working directory is at PyTorch repo root `/home/daisydeng/daisy_pytorch`
-2. Git remotes are properly configured (both `intel` and `daisyden` for torch-xpu-ops)
-3. Password-less authentication tokens are configured for GitHub push operations
-4. Miniforge environment is available at `~/miniforge3/bin/activate`
+This skill supports two input modes. Determine which before starting.
 
-## Instructions
+### Mode A: PR link or PR reference
 
-### Step 1: Setup Test Environment
+Examples: `https://github.com/intel/torch-xpu-ops/pull/3383`, `intel/torch-xpu-ops#3383`, or "PR 3383 on torch-xpu-ops".
 
-```bash
-source ~/miniforge3/bin/activate ~/miniforge3/envs/pytorch_opencode_env
+Parse into `(owner, repo, pr_number)`. Proceed to **Step 1A**.
+
+### Mode B: Local folder or file path
+
+Examples: `third_party/torch-xpu-ops`, `/home/.../my_clone`, `test/xpu/dynamo/test_misc_xpu.py`, or "fix lint in the current directory".
+
+The user wants to lint a working copy directly — no CI log exists. Proceed to **Step 1B**.
+
+If the input is ambiguous (e.g. just a repo name), ask the user which mode they mean.
+
+## High-Level Flow
+
+```
+Mode A (PR):                                  Mode B (local path):
+  1A. Fetch PR + failing job log via gh         1B. Identify the lintrunner-enabled repo root
+  2A. Parse lint report from log                    (ascend to the nearest .lintrunner.toml)
+  3A. Locate/clone the authoritative tree       2B. Select target files (explicit path, or
+                                                    changed files vs. base branch)
+                                                3B. Run lintrunner (or adapters directly)
+                                                    and parse the report
+
+Shared from here on:
+  4.  Look up each failing rule in .lintrunner.toml: include/exclude scope + adapter
+  4.5 Deep-analyze the failing code: intent, real vs. incidental vs. scope
+      mismatch; launch `explore` subagent for cross-file / cross-repo checks
+  5.  Decide fix strategy per rule (Fix Strategy Matrix)
+  6.  Ask the user to choose between viable strategies when there is a meaningful trade-off
+  7.  Apply fix; verify by re-running the adapter or lintrunner against the same file
+  8.  Ask the user before committing; for Mode A push to the PR head branch
 ```
 
-Always activate the correct environment before running lint or git commands.
+## Step 1A (PR): Fetch PR + Failing Job Log
 
-### Step 2: Navigate to torch-xpu-ops
+Prefer `gh` over `curl` — it handles auth, pagination, and redirects.
 
 ```bash
-cd third_party/torch-xpu-ops
+# Overview: find the failing check and its job id
+gh pr view <PR> --repo <owner>/<repo> \
+  --json number,title,headRefName,headRepositoryOwner,headRepository,baseRefName,statusCheckRollup
+
+# Pull the raw job log (2-3 MB is fine; let the tool truncate to file if huge)
+gh api repos/<owner>/<repo>/actions/jobs/<jobId>/logs
 ```
 
-All lint operations should be performed within the torch-xpu-ops directory.
+Notes:
+- `gh run view --log-failed` and `gh run view --log` sometimes return empty for check-suite jobs on forks. Fall back to `gh api .../jobs/<jobId>/logs`.
+- Save long logs to `agent_space/` only if you need to grep repeatedly; otherwise `tail -300` on the tool output is usually enough to capture the lintrunner section.
 
-### Step 3: Run lintrunner init
+## Step 2A (PR): Parse the Lint Report from the Log
 
-Initialize all linters before checking:
+Each lintrunner error block in the log looks like:
+
+```
+>>> Lint for <path>:
+  Error (<RULE_CODE>) <short name>
+    <long description>
+    >>> <lineno>  |<offending line>
+```
+
+Extract a table of `(rule_code, path, line, message)`. The GitHub Actions `##[error]...` summary at the bottom of the log lists the same errors; either is fine.
+
+## Step 3A (PR): Locate the Authoritative Source Tree
+
+Before editing anything, confirm where the PR's code actually lives.
 
 ```bash
+gh api repos/<owner>/<repo>/pulls/<PR> --jq '.head.ref,.head.repo.clone_url'
+```
+
+Decision:
+
+- **PR is against the repo you're currently in** (same `remote -v`): check out the PR locally with `gh pr checkout <PR>` on a throwaway branch, or fetch the PR ref without switching.
+- **PR is against a different repo** (common: `intel/torch-xpu-ops` when you're in `pytorch/pytorch`; torch-xpu-ops ships as a submodule whose pinned commit lags the PR): **do not** edit the submodule or attempt `gh pr checkout`. Clone the fork shallowly into `agent_space/`:
+
+  ```bash
+  git clone --depth 1 --branch <head_ref> <head_clone_url> agent_space/<repo>-pr<PR>
+  ```
+
+All subsequent edits, diffs, and pushes happen inside that clone. The submodule in the main repo is irrelevant for fixing the PR.
+
+### Always use a clean clone
+
+Every invocation of this skill must start from a **freshly cloned** directory. Do not reuse an `agent_space/<repo>-pr<PR>/` that already exists from a prior session — it may contain stale local commits, a detached HEAD behind the remote, or edits from a previous attempt that would silently taint the diff.
+
+```bash
+# If agent_space/<repo>-pr<PR> exists, pick a fresh suffix or remove it.
+# Prefer a new suffix so any prior work remains available for inspection:
+CLONE_DIR="agent_space/<repo>-pr<PR>-clean"
+[ -e "$CLONE_DIR" ] && CLONE_DIR="agent_space/<repo>-pr<PR>-$(date +%Y%m%d-%H%M)"
+git clone --depth 1 --branch <head_ref> <head_clone_url> "$CLONE_DIR"
+```
+
+Immediately verify the clone is at the PR head: `git rev-parse HEAD` should match `gh api repos/<owner>/<repo>/pulls/<PR> --jq .head.sha`. If it doesn't, stop — something is wrong with the clone.
+
+## Step 1B (local): Identify the lintrunner-enabled repo root
+
+`.lintrunner.toml` and the adapter scripts under `tools/linter/adapters/` live at a repo root. Starting from the given path, ascend until both exist:
+
+```bash
+TARGET="<path the user gave>"
+DIR="$(cd "$(dirname "$TARGET" 2>/dev/null || echo "$TARGET")" && pwd)"
+while [ "$DIR" != "/" ] && [ ! -f "$DIR/.lintrunner.toml" ]; do
+  DIR="$(dirname "$DIR")"
+done
+# $DIR is now the repo root; verify adapters exist
+test -d "$DIR/tools/linter/adapters" || echo "No adapter directory found — ask user."
+```
+
+If no `.lintrunner.toml` is found on the way up, stop and ask the user whether they meant a different path or want to run raw flake8/ruff instead. Do **not** operate on a path that lies inside a git submodule unless the submodule itself has its own `.lintrunner.toml` — edits there are usually a mistake (see Step 3A's submodule warning).
+
+Common cases:
+- User points at `third_party/torch-xpu-ops` from a pytorch checkout → repo root is `third_party/torch-xpu-ops` *only if* its `.lintrunner.toml` is present and the user actually wants to edit the submodule working copy (ask). Otherwise they probably mean a PR; re-ask.
+- User points at a file under `test/xpu/...` → ascend to the torch-xpu-ops root.
+- User points at a directory like `/home/me/my_clone` → that's the root if `.lintrunner.toml` is directly there.
+
+## Step 2B (local): Select target files
+
+```bash
+cd "$DIR"
+```
+
+Choose the set of files to lint:
+
+- **Explicit file**: the exact path the user gave.
+- **Explicit directory**: all files under it. Prefer `lintrunner --paths-cmd` over passing thousands of files manually; otherwise use `git ls-files -- <dir>`.
+- **"Files changed in my branch"**: `git diff <base>...HEAD --name-only --diff-filter=AMR` where `<base>` is typically `origin/main` or `origin/master`. Confirm the base branch with `git remote show origin | grep 'HEAD branch'` if unsure.
+- **Whole repo** (matches CI): `lintrunner --all-files` — usually too noisy; ask before choosing.
+
+## Step 3B (local): Run lintrunner (or adapters) and parse
+
+Preferred, if available:
+
+```bash
+# One-time per clone
 lintrunner init
-```
 
-This installs required dependencies:
-- FLAKE8 and extensions (flake8-bugbear, flake8-pyi, etc.)
-- CLANGFORMAT, CLANGTIDY
-- MYPY and type stubs
-- RUFF, BLACK, ISORT, SHELLCHECK
-- BAZEL_LINTER
-
-### Step 4: Get PR Branch Before Running Lintrunner
-
-**CRITICAL**: Before running lintrunner on a PR, you MUST identify and checkout the correct PR branch. All commits MUST be made to the PR branch, not to your local fork branch.
-
-#### Get PR Branch Reference
-
-Use the GitHub API to find the correct branch for a PR:
-
-```bash
-# Fetch PR info and extract branch reference
-PR_NUM=3385
-curl -s "https://api.github.com/repos/intel/torch-xpu-ops/pulls/${PR_NUM}" | grep -E '"head":|"label"|"ref"' | head -10
-
-# Extract the branch reference from head info
-# Example output: "label": "daisyden:daisyden/dtype_align_series"
-# This tells us the PR is from daisyden:daisyden/dtype_align_series branch
-```
-
-#### Checkout Correct PR Branch
-
-```bash
-# Get the branch name from the API response
-# Format: owner:branch-name (e.g., "daisyden:daisyden/dtype_align_series")
-REMOTE=owner  # extracted from "label" field
-BRANCH=branch-name  # extracted from "ref" field (e.g., daisyden/dtype_align_series)
-
-# Fetch the PR branch
-git fetch ${REMOTE} ${BRANCH}:${REMOTE}/${BRANCH}
-
-# Checkout the PR branch
-git checkout ${REMOTE}/${BRANCH}
-
-# Verify we're on the correct branch
-git status
-git log --oneline -3
-```
-
-#### Verify PR Commits
-
-After checkout, verify the PR contains expected commits:
-
-```bash
-git log --oneline -5  # Should show PR commits
-git diff daisyden/dtype_align_series..HEAD --stat  # Compare with base
-```
-
-### Step 5: Run Lintrunner on PR Branch
-
-Now run lintrunner on the PR branch:
-
-```bash
-# Always activate correct environment
-source ~/miniforge3/bin/activate ~/miniforge3/envs/pytorch_opencode_env
-
-# Run lintrunner init (first time only)
-lintrunner init
-
-# Find modified/added files in this PR
-git diff origin/main...HEAD --name-only --diff-filter=AM > new_files.txt
-```
-
-### Step 6: Determine Files to Lint
-
-#### Option A: Files from a PR
-
-```bash
-# Read files from new_files.txt or use git directly
-FILES=$(git diff origin/main...HEAD --name-only --diff-filter=AM | grep -E '\.(py|h|cpp|hpp)$')
-```
-
-#### Option B: All test files
-
-```bash
-FILES=$(git diff origin/main...HEAD --name-only --diff-filter=AM | grep -E '\.(py|h|cpp|hpp)$')
-```
-
-### Step 7: Run Deep Analysis on Lint Output
-
-Use the explore agent for deep semantic analysis of lint reports. DO NOT rely on simple pattern matching or regex search.
-
-#### For each lint error/warning:
-
-1. **Read context**: Load the file at the error line with surrounding lines
-2. **Understand semantics**: Analyze what the code does, not just the pattern
-3. **Identify root cause**: Determine if this is:
-   - A genuine code issue (E731 lambda assignment)
-   - An expected test registration (META_NO_CREATE_UNBACKED)
-   - Auto-formatting needed (line-too-long, trailing whitespace)
-4. **Categorize by type**:
-   - **Fixable with noqa**: E731 lambdas, intentional complex expressions
-   - **Fixable with auto-format**: FLAKE8 formatting, RUFF fixes
-   - **Expected test errors**: mypy PyTEST registration checks
-   - **Requires code change**: Real bugs or type issues
-
-#### Example analysis workflow:
-
-```
-For E731 lambda warnings:
-- Check if lambda is for triton grid (requires inline context)
-- If triton grid or capture_triton, add # noqa: E731 to SAME line as lambda
-- Do NOT try to convert to def - these lambdas are REQUIRED
-
-For META_NO_CREATE_UNBACKED errors:
-- These are EXPECTED in test files using ShapeEnv.create_unbacked_symint()
-- Document as known false positives, no action needed
-- If test uses create_unbacked APIs, this error is intentional
-
-For line-too-long (B950):
-- Check if inside string block or expected output
-- For expected outputs: add # noqa: B950 on SAME line as closing triple quote
-- For actual code: reformat to fit within 120 chars
-```
-
-### Step 8: Apply Fixes or Auto-Formatting
-
-Apply all fixes to the PR branch, then commit:
-
-```bash
-# Add noqa to individual lambda
-edit file.py old_string new_string  # noqa comment on same line as lambda
-git add file.py
-
-# Run auto-formatting
+# Lint specific files with machine-readable output
+lintrunner --tee-json=lint.json <files>
+# Or apply auto-fixes for formatters
 lintrunner -a <files>
-
-# Commit on PR branch (MANDATORY ask-user before commit)
-git commit -m "Lint: apply fixes to PR #${PR_NUM}
-
-Summary of fixes:
-- E731 noqa for triton grid lambdas  
-- Auto-formatting via lintrunner
-
-8 files changed, 189 insertions(+), 77 deletions(-)"
 ```
 
-### Step 9: Push to PR Branch
+`lint.json` is one JSON object per line, matching the CI format — parse the same way as Step 2A (each has `code`, `path`, `line`, `name`, `description`).
 
-**CRITICAL**: Push to the correct PR branch:
+**If `lintrunner` is not installed**, per `AGENTS.md` do not auto-install. Ask the user whether to install it (typically via `uv pip install lintrunner && lintrunner init`) or to proceed adapter-by-adapter. For the adapter-only path:
 
 ```bash
-# Push to PR branch (owner/branch from Step 4)
-git push origin HEAD:${BRANCH}
-
-# If changes needed, force push to PR branch only
-git push origin HEAD:${BRANCH} --force
-
-# For intel PRs - push to intel remote
-git push intel HEAD:refs/heads/${BRANCH}
+# For each [[linter]] block in .lintrunner.toml whose include_patterns match the target file,
+# invoke its `command` with @{{PATHSFILE}} replaced by a file listing the target paths.
+printf '%s\n' <file1> <file2> > /tmp/paths.txt
+python3 tools/linter/adapters/<adapter>.py <flags from .lintrunner.toml> -- $(cat /tmp/paths.txt)
 ```
 
-## Constraints
+This is how you reproduce CI failures locally without lintrunner installed (we used it on PR #3383 with `grep_linter.py`). It's tedious for many rules but sufficient to verify the specific rules that are failing.
 
-1. **PR branch required before lint**: ALWAYS get PR branch via curl (Step 4) before running lintrunner
-2. **DO NOT skip PR branch step**: Committing to wrong branch wastes time and causes confusion
-3. **Merge related commits**: Multiple lint commits for same PR should be squashed
-4. **Test environment**: Always use `~/miniforge3/envs/pytorch_opencode_env`
-5. **No force push to main**: Only force push to PR feature branches, never main
-6. **Preserve file content**: Auto-formatting should not change test logic
-7. **Ask user before commit**: Follow agent-guidelines commit protocol
+From here, Mode A and Mode B converge.
 
-## Used Tools
+## Step 4: Understand Each Failing Rule (the linter side)
 
-- **Read**: Load files at specific lines for context
-- **Edit**: Apply targeted fixes with # noqa comments
-- **Glob/Grep**: Find patterns for counting only, NOT for analysis
-- **Bash**: Run lint commands and git operations
-- **Task (explore subagent)**: For deep semantic analysis of complex lint reports
-- **todowrite**: Track progress for multi-step lint fixes
+Open `.lintrunner.toml` *in the working tree you're about to edit* (Mode A: the PR clone; Mode B: the repo root from 1B — don't read pytorch's config by mistake; configs diverge) and find the `[[linter]]` block with the failing `code`. Capture:
 
-## Deep Analysis Protocol
+- `include_patterns` and `exclude_patterns` — scope
+- `command = [...]` — which adapter in `tools/linter/adapters/` runs
+- Adapter flags — especially whether `--allowlist-pattern` is set
 
-When encountering lint errors, follow this analysis chain:
+### Does the rule honor `# noqa: <CODE>`?
 
-1. **Intent recognition**: What is the code trying to do?
-2. **Error classification**: Is this a style issue or semantic error?
-3. **Solution validation**: Will the fix maintain intended behavior?
-4. **Risk assessment**: Could fix break test logic?
+Not all linters do. Read the adapter to find out. Quick reference for common adapters in PyTorch/torch-xpu-ops:
 
-### Example: Analyzing B950 line-too-long
+| Adapter | Honors `# noqa: <CODE>`? | Notes |
+|---|---|---|
+| `flake8_linter.py` (FLAKE8, B950, E731, ...) | Yes | Standard flake8 semantics |
+| `ruff_linter.py` (RUFF, PYFMT via ruff) | Yes | Standard ruff semantics |
+| `grep_linter.py` (META_NO_CREATE_UNBACKED, many custom rules) | **No** by default. Pass `--allowlist-pattern` to enable an allowlist token; bare `# noqa: ...` is *not* recognized. |
+| `mypy_linter.py` (MYPY) | Yes via `# type: ignore[...]` | Not `# noqa` |
+| `black_linter.py`, `clangformat_linter.py` | N/A (formatters) | |
 
-WRONG approach:
-```
-grep for lines > 120 chars and auto-break them
-```
+**Key consequence**: for any rule backed by `grep_linter.py` without `--allowlist-pattern`, adding `# noqa: <CODE>` comments is *dead code*. The linter will still fire, and the comments mislead future readers. Either drop them or choose a different fix strategy.
 
-RIGHT approach (semantic):
-```
-1. Read context: is this in expected inline output or actual code?
-2. Check B950 location: line 752 in test_higher_order_ops_xpu.py
-3. Analyze content: torch.ops.aten._assert_scalar.default(...)
-4. Determine intent: This is torch.compile output for tracking
-5. Decision: For expected outputs in assertExpectedRaisesInline,
-   add # noqa: B950 on closing triple quote; for actual code,
-   break long variable assignments
-```
+### Confirm scope vs upstream
 
-### Example: Analyzing E731 lambda warnings
+If the failing rule is a torch-xpu-ops custom rule, compare with `pytorch/pytorch`'s `.lintrunner.toml`. torch-xpu-ops sometimes broadens `include_patterns` to `**/*.py` for rules pytorch only applies to a single file (e.g. `META_NO_CREATE_UNBACKED` → `torch/_meta_registrations.py`). Such over-broad scopes are a frequent root cause when porting tests.
 
-WRONG approach:
-```
-Replace all lambda with def using regex substitution
-```
+## Step 4.5: Understand the Failing Code (deep analysis)
 
-RIGHT approach (semantic):
-```
-1. Read context at line 1039 in test_aot_autograd_cache_xpu.py
-2. Check surrounding code: `capture_triton(kernel)[grid](...)`
-3. Recognize pattern: Triton grid functions are called inline
-4. Understand constraint: Triton requires callable with meta param
-5. Decision: Add # noqa: E731 to SAME LINE as lambda definition
-6. Verification: Test must still run and pass
-```
+Step 4 tells you how the rule fires. Step 4.5 tells you *whether the match is a real problem*. Do this **before** picking a fix strategy — otherwise you're pattern-matching, not engineering.
 
-## Handling Known False Positives
+For each reported error, answer these in order. If an answer requires poking around more than the immediate file, use the `explore` subagent (see below) rather than manual ripgrep.
 
-### META_NO_CREATE_UNBACKED errors
+1. **Read the failing site with real context.** Not 3 lines — load at least 20 lines above and below. For errors inside a class, also read the class docstring/signature. For errors inside an `assertExpectedInline` / triple-quoted block, read the whole string.
+2. **What is this code trying to do?** State it in one sentence (e.g. "this lambda is a Triton kernel grid function", "this is captured Dynamo output asserted inline"). If you can't, stop and explore more.
+3. **Is the violation real, incidental, or a rule-scope mismatch?**
+   - *Real*: the code is wrong by the rule's actual intent (e.g. a missing type annotation, a genuinely dead import).
+   - *Incidental*: the code does the right thing but triggers the rule mechanically (Triton grid lambda hitting E731; `# noqa` suppresses it where the adapter honors noqa).
+   - *Scope mismatch*: the rule was never meant to apply here (port of an upstream test hitting a linter aimed at `torch/_meta_registrations.py`). Confirm by reading the *upstream* file if one exists.
+4. **Does the same pattern already exist elsewhere in this repo, and how is it handled?** If another file uses the exact construct and passes lint, copy that approach. This is the single highest-leverage check and is where `explore` pays off.
+5. **Will the candidate fix change runtime behavior?** If yes, it's not a lint fix anymore — escalate to the user.
 
-These errors appear when tests use:
-- `ShapeEnv().create_unbacked_symint()`
-- `ShapeEnv().create_unbacked_symfloat()`
-- `ShapeEnv().create_unbacked_symbool()`
+Only after these five questions have answers do you go to Step 5.
 
-These are EXPECTED in PyTorch test files for shape environment testing.
-Document these but do NOT attempt to "fix" the code.
+### When to launch the `explore` subagent
 
-### Lambda warnings in triton context
+Use `task` with `subagent_type: explore` instead of doing it yourself when any of these is true:
 
-Triton grid functions LIKE `grid = lambda meta: (...)` are REQUIRED
-because they are called in inline context and cannot be converted
-to regular def functions in the same scope.
+- You need to check **more than ~3 files** to answer question 4 (how is this pattern handled elsewhere).
+- You need to find **all occurrences** of a pattern across the repo to scope a fix (e.g. "find every `grid = lambda meta:` so we can confirm E731 noqa is the repo-wide convention").
+- You need to **compare two repos** (e.g. this PR's `.lintrunner.toml` vs. `pytorch/pytorch`'s, or this file vs. its upstream source).
+- You need to verify a claim about an **adapter's behavior** by reading its source plus its call sites across several rules.
+- The lint report has **more than ~5 distinct rule codes** and you need a triaged summary before deciding strategies.
 
-## Validation Checklist
+Do **not** launch `explore` for:
+- A single file with a handful of errors of one rule code.
+- Anything you can answer by reading one adapter and one `.lintrunner.toml` block.
+- Iterative edit/verify cycles — do those yourself with `edit` + the adapter invocation from Step 3B.
 
-Before pushing:
-
-- [ ] PR branch identified via curl before starting lint work
-- [ ] Checked out correct PR branch (verified with `git status` and `git log`)
-- [ ] All E731 noqa comments added on SAME line as lambda
-- [ ] B950 noqa added on closing triple quote for expected outputs
-- [ ] No B950 noqa on content that should be reformatted
-- [ ] Auto-formatting applied consistently
-- [ ] Commits merged into single atomic commit for PR
-- [ ] Tests still pass after fixes (if verification possible)
-- [ ] Pushed to correct PR branch (owner/branch from Step 4)
-- [ ] Force push only to PR feature branches, never main
-
-## Example Workflows
-
-### Workflow 1: Fix PR lint issues (CORRECT - PR BRANCH FIRST)
+Explore prompt template (keep it tight and ask for concrete deliverables):
 
 ```
-1. Load skill for fix-lintrunner-issues
-2. Get PR branch via curl (Step 4):
-   curl -s "https://api.github.com/repos/intel/torch-xpu-ops/pulls/3385" | grep '"head":'
-   # Extract owner and branch from: "label": "daisyden:daisyden/dtype_align_series"
-3. Fetch and checkout PR branch:
-   git fetch daisyden daisyden/dtype_align_series:daisyden/dtype_align_series
-   git checkout daisyden/dtype_align_series
-4. Verify we're on PR branch (not local fork branch)
-5. Run lintrunner init
-6. Get changed files: git diff origin/main...HEAD --name-only
-7. Run lintrunner -a on all changed files
-8. For each error:
-   - Read context with 15-20 line window
-   - Classify: fixable/expected/auto-format
-   - Apply appropriate fix
-   - Always commit to PR branch (ask-user before commit)
-9. Push to PR branch: git push origin HEAD:daisyden/dtype_align_series
-```
-
-### Workflow 2: Fix fork branch lint issues
-
-```
-1. Load skill for fix-lintrunner-issues
-2. Ensure on correct daisyden branch (e.g., daisyden/dynamo_xpu)
-3. Run lintrunner init (if not done)
-4. Identify files needing fixes
-5. Run lintrunner -a on files
-6. Deep analysis of each error type
-7. Apply fixes with proper noqa comments
-8. Merge all lint commits into one
-9. Force push to daisyden branch
-```
-
-### Workflow 3: Quick PR lint check
-
-```
-PR_NUM=3385
-# Step 1: Get PR branch
-BRANCH=$(curl -s "https://api.github.com/repos/intel/torch-xpu-ops/pulls/${PR_NUM}" | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['ref'])")
-OWNER=$(curl -s "https://api.github.com/repos/intel/torch-xpu-ops/pulls/${PR_NUM}" | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['label'].split(':')[0])")
-
-# Step 2: Checkout PR branch
-git fetch ${OWNER} ${BRANCH}:PR-${PR_NUM}
-git checkout PR-${PR_NUM}
-
-# Step 3: Run lint and push
-source ~/miniforge3/bin/activate ~/miniforge3/envs/pytorch_opencode_env
-lintrunner init
-lintrunner -a $(git diff origin/main...HEAD --name-only --diff-filter=AM)
-git add -A && git commit -m "Lint fixes" && git push ${OWNER} HEAD:${BRANCH}
-```
-
-## Deep Analysis for Complex Lint Issues
-
-When `lintrunner -a` cannot fix an issue, deep semantic analysis is required.
-
-### When Deep Analysis is Needed
-
-Apply deep analysis when:
-1. `lintrunner -a` reports errors that require code changes
-2. Tests use CUDA-specific APIs but need XPU compatibility
-3. Import statements need updating for XPU support
-4. Device-specific logic needs generalization
-5. Decorators need to be changed for XPU testing
-
-### Deep Analysis Decision Tree
-
-```
-1. WHAT: What does the error message say?
-   ↓
-2. WHERE: Which file and line is affected?
-   ↓
-3. WHY: Why was this code written this way?
-   ↓
-4. CONTEXT: Read 15-20 lines around the error
-   ↓
-5. CLASSIFY: Is this:
-   - A CUDA-only import that needs GPU_TYPE?
-   - A hard-coded device="cuda" that needs device=GPU_TYPE?
-   - A requires_cuda that needs requires_gpu_and_triton?
-   - An expected test that should skip on specific conditions?
-   ↓
-6. DECIDE: What is the minimal fix to make XPU-compatible?
-   ↓
-7. VERIFY: Check similar patterns in the codebase
-   ↓
-8. FIX: Apply targeted edit
-```
-
-### Common XPU Compatibility Patterns to Fix
-
-#### Pattern 1: CUDA-specific imports
-```python
-# BAD (CUDA-only)
-from torch.testing._internal.triton_utils import requires_cuda_and_triton
-from torch.testing._internal.common_cuda import requires_cuda
-
-# GOOD (XPU-compatible)
-from torch.testing._internal.inductor_utils import GPU_TYPE
-from torch.testing._internal.triton_utils import requires_gpu_and_triton
-```
-
-#### Pattern 2: Hard-coded device strings
-```python
-# BAD
-torch.Stream(device="cuda")
-x = torch.ones(2, 2, device="cuda")
-
-# GOOD
-torch.Stream(device=GPU_TYPE)
-x = torch.ones(2, 2, device=GPU_TYPE)
-```
-
-#### Pattern 3: Decorator changes
-```python
-# BAD
-@requires_cuda
-@requires_cuda_and_triton
-
-# GOOD
-@requires_gpu_and_triton
-```
-
-#### Pattern 4: Device module selection
-```python
-# BAD
-with torch.cuda.stream(s):
-    x = torch.sin(x)
-
-# GOOD
-device_module = torch.get_device_module(GPU_TYPE)
-with device_module.stream(s):
-    x = torch.sin(x)
-```
-
-#### Pattern 5: Backend-specific capability checks
-```python
-# BAD
-if not torch.cuda.is_bf16_supported():
-    raise unittest.SkipTest("requires bf16")
-
-# GOOD
-if GPU_TYPE == "cuda":
-    bf16_supported = torch.cuda.is_bf16_supported()
-elif GPU_TYPE == "xpu":
-    bf16_supported = getattr(torch.xpu, "is_bf16_supported", lambda: False)()
-else:
-    bf16_supported = False
-if not bf16_supported:
-    raise unittest.SkipTest("requires bf16")
-```
-
-#### Pattern 6: Event/class instantiation
-```python
-# BAD
-event = torch.cuda.Event() if torch.cuda.is_available() else torch.xpu.Event()
-
-# GOOD
-Event = torch.cuda.Event if torch.cuda.is_available() else torch.xpu.Event
-event = Event()
-```
-
-### Using Explore Subagent for Complex Analysis
-
-For complicated issues, use the explore agent:
-
-```bash
 Task(
-    description="Analyze XPU compatibility for test file",
-    prompt="""Analyze test/xpu/dynamo/test_streams_xpu.py for CUDA-specific patterns.
+  description="classify lint rule scope",
+  subagent_type="explore",
+  prompt="""
+In the repo at <path>, for rule <RULE_CODE>:
 
-Required analysis:
-1. Find all @requires_cuda decorators → change to @requires_gpu_and_triton
-2. Find device=\"cuda\" → change to device=GPU_TYPE
-3. Find requires_cuda import → add requires_gpu_and_triton import
-4. Check if GPU_TYPE is imported
+1. Open .lintrunner.toml and extract include_patterns, exclude_patterns, and
+   the adapter command for this rule.
+2. Read tools/linter/adapters/<adapter>.py and report whether it honors
+   `# noqa: <RULE_CODE>` (look for noqa handling or --allowlist-pattern).
+3. Search the repo for existing occurrences of the failing pattern that are
+   NOT flagged (i.e. legitimate uses). For each, report file:line and whether
+   it uses noqa, getattr indirection, or is excluded via .lintrunner.toml.
+4. If this file is a port of an upstream pytorch test (check filename against
+   pytorch/test/), compare the corresponding upstream config scope.
 
-Return a summary of changes needed with file:line references.
+Return: a single summary with (a) adapter honors noqa yes/no,
+(b) count of existing legitimate occurrences and their handling strategy,
+(c) upstream scope comparison if applicable. Do NOT edit any files.
 """
 )
 ```
 
-### Validating Fixes
+Thoroughness hint: use `"quick"` for one-file / one-rule checks, `"medium"` for port-vs-upstream comparisons, `"very thorough"` only when triaging a lint report with many rules or when the fix will touch many files.
 
-After applying deep analysis fixes:
+## Step 5: Fix Strategy Matrix
+
+Pick based on the Step 4.5 classification and whether the linter honors noqa:
+
+| Situation | Strategy |
+|---|---|
+| Real violation, noqa honored | Fix the code |
+| Real violation, noqa **not** honored, small edit possible | Rewrite to avoid the pattern (e.g. `getattr(obj, "create_unbacked_symint")()`) |
+| Incidental, noqa honored | Add `# noqa: <CODE>` with a one-line justification comment |
+| Incidental, noqa **not** honored | Add file to `exclude_patterns` in `.lintrunner.toml` with a rationale comment |
+| Scope mismatch (rule aimed at different subtree) | Add file to `exclude_patterns`; if many files, consider narrowing `include_patterns` (asks user) |
+| Formatter error (BLACK/RUFF/CLANGFORMAT) | `lintrunner -a` if available; otherwise apply the suggested diff from the log |
+| Expected-output string blocks triggering B950 | `# noqa: B950` on the line with the terminating `"""` (per `AGENTS.md`) |
+| Triton `grid = lambda meta: ...` (E731) | `# noqa: E731` on the line with `lambda`, not the closing paren |
+
+When multiple strategies are viable (commonly: exclude file vs. narrow include_patterns vs. rewrite code), **ask the user** with a `question` tool call, recommending the most targeted, least-invasive option first.
+
+## Step 6: Verify the Fix
+
+Re-run the same linter that was failing, scoped to the modified file(s):
+
+- **With lintrunner**: `lintrunner <file>` or `lintrunner --take <RULE_CODE> <file>` to target one rule.
+- **Adapter-only** (see Step 3B for the general recipe). Example for a grep-based rule:
+
+  ```bash
+  python3 tools/linter/adapters/grep_linter.py \
+    --pattern='create_unbacked' \
+    --linter-name=META_NO_CREATE_UNBACKED \
+    --error-name=test --error-description=test \
+    -- <file>
+  ```
+
+  A successful fix produces no JSON objects on stdout. Match the error count against the original report before and after your edit.
+
+- **Standalone fallbacks** when the failure is a well-known generic rule: `python3 -m ruff check <file>`, `python3 -m flake8 <file>`.
+
+For `exclude_patterns` changes in `.lintrunner.toml`: verify by running `lintrunner <file>` (it reads the config); the adapter itself won't reflect the change because `lintrunner` is what applies `exclude_patterns`.
+
+## Step 7: Apply the Fix
+
+- Mode A: edit inside `agent_space/<repo>-pr<PR>/`, not the main repo or its submodules.
+- Mode B: edit inside the repo root identified in Step 1B.
+- Keep the diff minimal. Don't bundle unrelated reformatting with the lint fix.
+- If you add an `exclude_patterns` entry, include an inline comment explaining the rationale (why the file is legitimately exempt).
+- If you remove dead `# noqa` comments because the linter doesn't honor them, mention it in the commit message — otherwise it looks like a drive-by change.
+
+### Only touch files that appear in the lint report
+
+The set of files you may modify is exactly:
+
+- Files listed in the lint report from Step 2A / Step 3B, **or**
+- `.lintrunner.toml` (only when the Fix Strategy Matrix calls for an `exclude_patterns` / `include_patterns` change).
+
+Nothing else. Do not fix unrelated linter advice you notice along the way, do not reformat surrounding code, do not "while I'm here" rename things. If a bulk formatter (`lintrunner -a`, `ruff format`, `black`) would touch files outside this set, run it **only on the in-scope paths**, never with `--all-files`.
+
+Before staging, confirm the diff is scoped:
 
 ```bash
-# Verify no CUDA-specific hard-coded devices remain
-grep -n 'device="cuda"' test/xpu/dynamo/test_*.py
-
-# Verify correct imports exist
-grep -n 'GPU_TYPE\|requires_gpu_and_triton' test/xpu/dynamo/test_*.py
-
-# Run lintrunner to check for remaining issues
-lintrunner -a test/xpu/dynamo/test_*.py
+git status -s
+git diff --stat
+# Every path shown must be either (a) a file from the lint report, or
+# (b) .lintrunner.toml. If not, revert the stray change with
+# `git checkout -- <path>` before continuing.
 ```
 
-### Example: Complete Deep Analysis Fix
+If you believe an out-of-scope edit is genuinely required (e.g. the only fix for the reported rule is to adjust an import in a sibling file), stop and ask the user with `question` before making it — don't silently expand scope.
 
-Copilot AI review identified test_ctx_manager_xpu.py issues:
+## Step 8: Commit and Push
 
-**Issue**: Uses `torch.cuda.device()` unconditionally, fails on XPU-only
+Follow `AGENTS.md`:
+- Do not commit unless the user asked. A user answering "yes" to a "commit and push?" question *is* explicit permission.
+- Commit message: short subject, a paragraph explaining the *why*, no bullet list of individual file changes for small fixes. Preserve `ghstack-source-id` / `Pull-Request` trailers if present on prior commits. End with "Authored with Claude."
+- **Mode A**: push to the PR head branch on the head fork, never to `main`:
 
-**Analysis**:
-```
-1. Read context at line 673 in test_ctx_manager_xpu.py
-2. Code: with torch.cuda.device(x.device.index - 1):
-3. Why: Setting device context for tensor operations
-4. Solution: Use torch.get_device_module(GPU_TYPE).device(...)
-```
+  ```bash
+  cd agent_space/<repo>-pr<PR>
+  git push origin <head_ref>
+  ```
 
-**Fix applied**:
-```python
-# BEFORE
-with torch.cuda.device(x.device.index - 1):
-    x = torch.sin(x + 1)
+- **Mode B**: there is no PR branch to push to. After committing locally, ask the user whether they want the commit pushed and to which remote/branch. Default to no push.
 
-# AFTER
-with torch.get_device_module(GPU_TYPE).device(x.device.index - 1):
-    x = torch.sin(x + 1)
-```
+- Don't force-push unless the user asked or the remote has a dangling prior attempt by you in this session.
 
-**Verification**: Similar pattern found in other test functions - apply consistently.
+## Constraints
+
+1. **Never install tools unprompted** — ask the user per `AGENTS.md`.
+2. **Never edit the submodule pin** when fixing a torch-xpu-ops PR from inside a pytorch checkout.
+3. **Always start from a fresh clone** (Mode A). Never reuse an existing `agent_space/<repo>-pr<PR>/` directory from a previous session — pick a new suffix or remove it first. See Step 3A "Always use a clean clone".
+4. **Never modify files outside the lint report's scope.** The only permissible edits are (a) the files flagged by the linter and (b) `.lintrunner.toml` when the Fix Strategy Matrix calls for it. See Step 7 "Only touch files that appear in the lint report".
+5. **Never assume `# noqa` works** — check the adapter. Dead noqa comments are a code smell, not a fix.
+6. **Do not broaden `exclude_patterns`** to globs like `test/**/*.py` to make a single file pass; use the specific path.
+7. **Do not squash / rewrite history** on the PR branch without user approval — the PR has reviewers tracking commits.
+8. **Only commit when explicitly asked.** When offering fix strategies via `question`, the user's selection is permission to edit but *not* to commit; ask again before `git commit`.
+9. **One fix, one commit.** If you fix two unrelated lint rules, consider two commits unless the user prefers otherwise.
+
+## Tools Used
+
+- `bash` — `gh`, `git`, adapter invocations, `lintrunner`
+- `gh api` / `gh pr view` — PR metadata and job logs (Mode A)
+- `read`, `grep`, `glob` — inspect `.lintrunner.toml`, adapter source, offending files; small/targeted lookups
+- `task` with `subagent_type: explore` — Step 4.5 cross-file / cross-repo / multi-rule investigation. See triggers in Step 4.5.
+- `edit`, `write` — apply fixes
+- `question` — when fix strategies have meaningful trade-offs, or before committing
+- `todowrite` — only for ≥3-step multi-file lint fixes
+
+## Known Patterns
+
+### `grep_linter.py`-backed rules with over-broad scope
+
+Symptom: a rule that in pytorch only scans one file triggers on a ported test in torch-xpu-ops, and `# noqa: <CODE>` comments do nothing.
+
+Example: `META_NO_CREATE_UNBACKED` fires on `test/xpu/dynamo/test_misc_xpu.py` (a port of `test/dynamo/test_misc.py`) because torch-xpu-ops sets `include_patterns = ["**/*.py"]`. Fix used in PR #3383: add the specific test file to `exclude_patterns` and drop the dead `# noqa` comments so the port matches upstream verbatim.
+
+### `flake8`/`ruff`-backed rules (E731, B950, F401, ...)
+
+`# noqa: <CODE>` works. Place it on the line where the pattern actually matches:
+- E731 (`grid = lambda meta: ...`): on the `lambda` line, not the closing paren
+- B950 inside a triple-quoted expected output: on the line with the closing `"""`, not inside the string
+
+### Formatter conflicts
+
+If `lintrunner -a` is available and the failure is purely formatting, a single `lintrunner -a <files>` + commit is usually enough. Review the diff first to confirm it's non-semantic.
+
+### CUDA-specific tests failing XPU-specific lints
+
+If the file needs substantive refactoring for XPU (device strings, decorators, imports), that's outside this skill — see `port-cuda-tests-xpu` and `fix-issues-identified-by-comments`. This skill only covers the lint layer.
+
+## Worked Example: PR intel/torch-xpu-ops#3383
+
+1. `gh pr view 3383 --repo intel/torch-xpu-ops ...` showed `preci-lint-check` FAILURE, job id in `detailsUrl`.
+2. `gh api repos/intel/torch-xpu-ops/actions/jobs/72814124123/logs` returned six `META_NO_CREATE_UNBACKED` errors on `test/xpu/dynamo/test_misc_xpu.py`.
+3. PR head was `daisyden/daisyden/dynamo_xpu` on `github.com/daisyden/torch-xpu-ops` — a fork of a different repo than the current checkout (pytorch). Cloned into `agent_space/torch-xpu-ops-pr3383/`.
+4. `.lintrunner.toml` in that clone defined the rule with `include_patterns = ["**/*.py"]` and the `grep_linter.py` adapter with no `--allowlist-pattern`. The existing `# noqa: META_NO_CREATE_UNBACKED` comments in the file were therefore dead.
+5. Fix strategies offered to user: (a) add file to `exclude_patterns` [recommended], (b) scope `include_patterns` to meta registrations, (c) rewrite calls via `getattr`. User chose (a).
+6. Applied the exclude_patterns entry; separately, user asked whether to also remove the dead `# noqa` comments. Confirmed by diffing upstream `pytorch/test/dynamo/test_misc.py` (which has no such comments) and removed them to match.
+7. Reproduced the original 6 errors by running the adapter directly (`python3 tools/linter/adapters/grep_linter.py --pattern=create_unbacked ...`) against the unfixed file, confirming the fix surface matches CI.
+8. Committed (after user asked "ready to commit and push?") and pushed to `origin daisyden/dynamo_xpu`.
+
+Key lessons from this example are baked into the Fix Strategy Matrix and Constraints above.

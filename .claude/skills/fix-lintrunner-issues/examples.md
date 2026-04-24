@@ -125,38 +125,76 @@ wrap = torch.ops.higher_order.wrap(wrap_body_1, s77, l_x_, ...); ...
 )
 ```
 
-## Example 3: META_NO_CREATE_UNBACKED Errors
+## Example 3: META_NO_CREATE_UNBACKED Errors (PR intel/torch-xpu-ops#3383)
 
 ### Error Context
 ```bash
-# test/xpu/dynamo/test_misc_xpu.py line 11677-11679
-main.create_unbacked_symint()
-main.create_unbacked_symfloat()
-main.create_unbacked_symbool()
-# Error: Data-dependent operators should have meta registration
+# test/xpu/dynamo/test_misc_xpu.py lines 11677-11679, 11831-11832
+main.create_unbacked_symint()   # noqa: META_NO_CREATE_UNBACKED
+main.create_unbacked_symfloat() # noqa: META_NO_CREATE_UNBACKED
+main.create_unbacked_symbool()  # noqa: META_NO_CREATE_UNBACKED
+# preci-lint-check still reports 6 errors despite the noqa comments.
 ```
 
-### Analysis Approach
+### Why the noqa comments don't help
 
-```python
-# Step 1: Understand what create_unbacked APIs do
-# These create symbolic integers/floats/booleans that depend on runtime conditions
-# NOT for meta registrations - they're test utilities
+Inspecting `.lintrunner.toml` in torch-xpu-ops:
 
-# Step 2: Recognize this is EXPECTED in TEST code
-# Test file test_misc_xpu.py uses ShapeEnv() to test shape environment behavior
-# create_unbacked is ACTUALLY WHAT SHOULD BE USED in this context
-# mypy's META_NO_CREATE_UNBACKED check is a safeguard for torch/_meta_registrations.py
-
-# Step 3: Decision
-"""
-THESE ARE FALSE POSITIVES FOR TEST FILES
-- test_misc_xpu.py is a TEST file, not meta registration
-- create_unbacked is REQUIRED for testing ShapeEnv
-- mypy check is overly aggressive for test contexts
-"""
-# ACTION: DOCUMENT, NO CODE CHANGE NEEDED
+```toml
+[[linter]]
+code = 'META_NO_CREATE_UNBACKED'
+include_patterns = ["**/*.py"]     # ← applies repo-wide, unlike pytorch
+command = [
+    'python3', 'tools/linter/adapters/grep_linter.py',
+    '--pattern=create_unbacked',
+    '--linter-name=META_NO_CREATE_UNBACKED',
+    ...
+]
 ```
+
+`grep_linter.py` without `--allowlist-pattern` is a raw grep. It does **not** understand `# noqa: <CODE>`. So the noqa comments are dead code; they neither suppress the error nor document anything useful.
+
+Compare with upstream `pytorch/pytorch/.lintrunner.toml`, where this rule is scoped to `include_patterns = ["torch/_meta_registrations.py"]`. Upstream `test/dynamo/test_misc.py` calls `create_unbacked_*` freely with no noqa — because the rule never scans it.
+
+### Correct fix (applied in PR #3383)
+
+1. Add the ported test file to `exclude_patterns` for that one rule:
+
+   ```toml
+   [[linter]]
+   code = 'META_NO_CREATE_UNBACKED'
+   include_patterns = ["**/*.py"]
+   exclude_patterns = [
+     # Port of upstream test/dynamo/test_misc.py which legitimately calls
+     # ShapeEnv.create_unbacked_* to test ShapeEnv equality.
+     "test/xpu/dynamo/test_misc_xpu.py",
+   ]
+   ```
+
+2. Delete the dead `# noqa: META_NO_CREATE_UNBACKED` comments from the test file so it matches upstream verbatim.
+
+### Verification without lintrunner
+
+```bash
+cd agent_space/torch-xpu-ops-pr3383
+# Reproduces the exact 6 CI errors against the unfixed file:
+python3 tools/linter/adapters/grep_linter.py \
+  --pattern=create_unbacked \
+  --linter-name=META_NO_CREATE_UNBACKED \
+  --error-name=test --error-description=test \
+  -- test/xpu/dynamo/test_misc_xpu.py
+```
+
+After the `exclude_patterns` change, `lintrunner` (which reads `.lintrunner.toml`) skips the file entirely; the adapter is never invoked.
+
+### Alternative strategies (rejected, for reference)
+
+- **Narrow `include_patterns`** to `torch/_meta_registrations.py` like upstream — broader config change, affects intent of having the rule repo-wide. Ask the user.
+- **Rewrite as `getattr(main, "create_unbacked_symint")()`** — avoids the literal string, but hacky and diverges from upstream.
+
+### Key takeaway
+
+For any `grep_linter.py`-backed rule, `# noqa` doesn't work. Fix via `.lintrunner.toml` scoping, not via comments.
 
 ## Example 4: Auto-Formatting vs Manual Fix
 
@@ -247,10 +285,11 @@ git push daisyden HEAD:daisyden/feature_branch --force
 
 ## Key Takeaways
 
-1. **Deep analysis > pattern matching**: Always read context and understand WHY
-2. **Preserve test logic**: Auto-formatting should not change behavior
-3. **Triton lambdas are REQUIRED**: Cannot replace with def in most cases
-4. **Expected outputs need noqa**: For assertExpectedRaisesInline content
-5. **Document false positives**: META_NO_CREATE_UNBACKED in tests is expected
-6. **Atomic commits**: Merge lint commits for cleaner PR history
-7. **Test environment critical**: Always use ~/miniforge3/envs/pytorch_opencode_env
+1. **Deep analysis > pattern matching**: read the adapter code and the rule's include/exclude scope, not just the error line.
+2. **Not all linters honor `# noqa`**: `grep_linter.py` without `--allowlist-pattern` does not. Adding noqa comments there is dead code.
+3. **Fix at the right layer**: code edit, `# noqa`, or `.lintrunner.toml` scope — pick based on the adapter and the rule's intent.
+4. **Triton `grid = lambda meta: ...`**: E731 is flake8; `# noqa: E731` works on the `lambda` line.
+5. **Expected outputs need noqa on closing `"""`**: for B950 inside `assertExpectedInline` strings.
+6. **Ported tests != meta registrations**: when an upstream test is ported into torch-xpu-ops, check whether the rule scope differs from pytorch's.
+7. **Verify without lintrunner**: invoke the adapter directly to reproduce and confirm fixes.
+8. **Commit only when explicitly asked**, and push to the PR head branch on the fork, never to `main`.
