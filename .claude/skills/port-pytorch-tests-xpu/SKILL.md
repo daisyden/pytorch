@@ -1,6 +1,6 @@
 ---
 name: port-pytorch-tests-xpu
-description: Port PyTorch unit tests to torch-xpu-ops for XPU backend coverage. Use when copying/migrating tests from pytorch/test to third_party/torch-xpu-ops/test/xpu. Covers two approaches: direct copy and hook override. Follows agent-guidelines for atomic commits and semantic analysis.
+description: Port PyTorch unit tests to torch-xpu-ops for XPU backend coverage. Use when copying/migrating tests from pytorch/test to third_party/torch-xpu-ops/test/xpu. Covers two approaches (direct copy and hook override), enforces hook-body parity with upstream (no assertions/checkers/branches removed), requires a recursive word-level diff audit before commit, and requires filing intel/torch-xpu-ops issues with a Context section linking back to the PR for any XPU-side failure. Follows agent-guidelines for atomic commits and semantic analysis.
 ---
 
 # Port PyTorch Tests to torch-xpu-ops
@@ -19,6 +19,7 @@ Always apply agent-guidelines rules including:
 
 ## Related Skills
 - **agent-guidelines** (REQUIRED): Must be loaded first for behavior rules
+- **submit_ut_issues** (REQUIRED when filing issues): Defines the issue template, labels, GitHub API workflow, and the mandatory Context section that cross-links the porting PR
 - **at-dispatch-v2**: For C++ kernel type dispatch work
 - **add-uint-support**: For unsigned integer type additions
 
@@ -558,20 +559,141 @@ For XPU limitations (not bugs):
 | Missing kernel on XPU | Enable anyway, document limitation, reference issue |
 | XPU根本没实现功能 | Add skipXPUIf with clear message |
 
+## Parity Requirement: Hook Bodies Must Match Upstream
+
+**MANDATORY:** Any hook function or function copied from `pytorch/test/...` into `third_party/torch-xpu-ops/test/xpu/...` MUST preserve the exact logic of the original. In particular:
+
+- **Do NOT remove any assertion** (`self.assertEqual`, `self.assertTrue`, `self.assertRaises*`, `assert_allclose`, `assertExpectedInline`, `assertIn`, `assertRegex`, etc.).
+- **Do NOT remove any checker call** (`self.assertNoLogs`, `self.assertWarns*`, `self.assertNotWarns`, `assertNoOpResolved`, etc.).
+- **Do NOT remove platform branches** (`if torch.version.hip:`, `if IS_WINDOWS:`, `if not TEST_WITH_ROCM:`, etc.). Substitute the inner CUDA-specific values rather than dropping the branch.
+- **Do NOT silently weaken `assertExpectedInline(...)` to `assertIn(...)`**. If the upstream baseline cannot match on XPU, keep the upstream check, let it fail, and file an issue (see "Submitting Issues for XPU Failures" below).
+- **Do NOT drop helper assertions inside loops**, e.g. comparisons against CPU/reference, dtype/shape sanity checks, gradient checks, or numerics tolerances.
+
+**Allowed substitutions only:**
+- `cuda` → `xpu` (`.cuda()` → `.xpu()`, `device="cuda"` → `device="xpu"`, `ProfilerActivity.CUDA` → `ProfilerActivity.XPU`).
+- `torch.cuda.X` → `torch.xpu.X` when an exact XPU equivalent exists.
+- `cudaLaunchKernel` → `xpuLaunchKernel` (or the actual XPU runtime event name once known).
+- `TEST_CUDA` → `torch.xpu.is_available()` only when the decorator is the gating condition; do NOT use this as a way to drop branches.
+- Comments referring to "CUDA" → "XPU" only when the comment is purely descriptive.
+
+**Forbidden:**
+- Replacing a real upstream check with a smoke check (`assertIn("aten::", trace)` instead of `assertExpectedInline(trace, expected)`).
+- Removing `setUp` / `tearDown` logic.
+- Removing nested classes or helper functions used only inside the hook.
+- "Simplifying" away device-list iteration (e.g. collapsing `for device in ['cpu', 'xpu']` to `for device in ['xpu']`) without explicit justification.
+
+**Required justification format if any logic IS dropped:**
+A code comment immediately above the divergence stating:
+1. What was removed.
+2. Why it cannot run on XPU.
+3. The intel/torch-xpu-ops issue tracking the gap.
+
+Example:
+```python
+# XPU gap: upstream asserts cudaLaunchKernel but XPU profiler emits
+# many Level Zero events per aten op. Tracked in intel/torch-xpu-ops#3483.
+# Keep upstream assertExpectedInline anyway so the test fails loudly
+# until parity lands.
+self.assertExpectedInline(actual_traces, expected)
+```
+
+## Audit & Word-Level Diff (MANDATORY at end of porting work)
+
+Before considering a port complete, run a recursive body-text audit comparing every ported hook to its upstream counterpart and emit word-level diffs.
+
+### Required tools
+
+Two helper scripts to drop in `agent_space/` or `/tmp/`:
+
+1. **Strict body comparator** — uses `ast.unparse` recursively (so nested classes/methods are included), normalizes `cuda → xpu` and quote style, then runs `difflib.unified_diff`:
+
+   ```python
+   # /tmp/strict_body_diff.py (sketch)
+   import ast, difflib, re
+   def normalize(src):
+       src = re.sub(r"\bcuda\b", "xpu", src)
+       src = re.sub(r"\bCUDA\b", "XPU", src)
+       src = re.sub(r"cudaLaunchKernel", "xpuLaunchKernel", src)
+       src = src.replace("'", '"')
+       return src
+   def body_text(func):
+       return "\n".join(ast.unparse(s) for s in func.body)
+   ```
+
+2. **Word-level diff emitter** — for every `(hook_func, upstream_method)` pair, emit a markdown file under `agent_space/per_function_diffs/<file>.diff.md` using `[-removed-]{+added+}` syntax:
+
+   ```python
+   # /tmp/diff_xpu_vs_upstream.py (sketch)
+   from difflib import ndiff
+   def word_diff(a, b):
+       # Tokenize on whitespace, run ndiff, render with [-...]{+...+}
+       ...
+   ```
+
+### Audit workflow
+
+1. Inventory every hook function across all newly-added/modified XPU test files (`def _test_*`, `def _xpu_*`).
+2. Locate each hook's upstream counterpart in `pytorch/test/...` (search by un-prefixed name, e.g. `_test_foo` → `test_foo`).
+3. For each pair, run the strict body comparator. Any non-empty diff goes to manual classification:
+   - **Cosmetic** (quote style, `ast.unparse` artifacts, dropped no-op `__init__`, return-type annotations): no action.
+   - **Intentional XPU-specific override**: must already have a justification comment (see Parity Requirement). If missing, add one.
+   - **Real divergence** (missing assertion, removed branch, weakened check): **fix it before commit**.
+4. Emit word-level diffs to `agent_space/per_function_diffs/`. One file per ported test file. Word diff uses `[-old-]{+new+}` for any tokens that differ after normalization.
+5. Write a summary table to `agent_space/per_function_diffs/AUDIT_RESULTS.md` with one row per hook: file, hook name, upstream name, verdict (Cosmetic / Intentional / Fixed / Bug).
+6. The audit is the gate: if any hook's verdict is "Bug", fix and re-run before committing.
+
+### Audit deliverables checklist
+
+- [ ] `agent_space/per_function_diffs/` populated with one `*.diff.md` per modified XPU test file.
+- [ ] `agent_space/per_function_diffs/AUDIT_RESULTS.md` with verdicts for every hook.
+- [ ] Zero "Bug" verdicts remaining (all fixed).
+- [ ] Every "Intentional" verdict has an inline justification comment in the source code referencing the tracking issue.
+
+## Submitting Issues for XPU Test Failures
+
+When a ported test fails on XPU and the failure is **not** a porting bug (i.e. the port itself is faithful but XPU lacks the underlying capability or numeric behavior), file an issue on `intel/torch-xpu-ops` BEFORE committing the port.
+
+**Follow the `submit_ut_issues` skill** for the full submission workflow (template, labels, GitHub API calls, deep-analysis patterns).
+
+In addition to the requirements in `submit_ut_issues`, every issue filed during porting work MUST include the **Context** section described in `submit_ut_issues/SKILL.md` ("Context Section: When Required"). Concretely the Context section must:
+
+1. Name the porting PR by number (`PR #NNNN`) and include the full PR URL.
+2. State the current PR state for the failing test (`skipped`, `failing`, or `enabled-but-failing`) and the file path holding the workaround.
+3. State what becomes possible once the issue is resolved (skip can be removed / assertion will pass without further changes).
+
+After filing, follow the `submit_ut_issues` "After Filing" steps: reference the issue URL in the relevant commit message, add an inline code comment next to the skip / weakened check (`# Tracked in intel/torch-xpu-ops#NNNN`), and ensure the issue is listed in the PR description's tracking section.
+
+### When to file (porting-specific guidance)
+
+File an issue if:
+- Ported hook runs end-to-end but fails an assertion due to XPU runtime behavior (event names, distribution uniformity, error messages, tolerances).
+- An XPU equivalent of a CUDA-only helper is missing (`CUDARngStateHelper`, blockwise scaled_mm, etc.).
+- A CUDA-only feature is invoked by the test body and there is no XPU analog yet.
+
+Do NOT file an issue for:
+- A bug introduced by the port itself (fix the port instead — see Parity Requirement).
+- A pure environment / build problem on the local machine.
+- A known issue already tracked — comment on the existing issue with the new test name and PR cross-link instead of opening a duplicate.
+
 ## Checklist Before Commit
 
 - [ ] CUDA test located and mapped to XPU naming (_cuda -> _xpu)
 - [ ] XPU test updated/created in third_party/torch-xpu-ops/test/xpu/
 - [ ] `dtypesIfXPU` import verified
 - [ ] @dtypesIfXPU aligned with CUDA @dtypesIfCUDA
+- [ ] **Hook body parity verified: no assertions / checkers / branches removed vs upstream**
+- [ ] **Any intentional divergence has an inline justification comment + tracking-issue reference**
 - [ ] Test runs in pytorch_opencode_env conda environment
 - [ ] Test discovery verified (--collect-only)
 - [ ] Failure analyzed: Is it missing dtypes, XPU limitation, or a bug?
 - [ ] Intel torch-xpu-ops issues checked for similar cases
+- [ ] **For every non-port-bug failure: issue filed on intel/torch-xpu-ops with a Context section linking back to this PR**
 - [ ] Solution implemented and test re-run
 - [ ] Known limitations documented with issue references
+- [ ] **Audit & word-level diff completed (see "Audit & Word-Level Diff")**
+- [ ] **`agent_space/per_function_diffs/AUDIT_RESULTS.md` updated; zero "Bug" verdicts**
 - [ ] Atomic commit created
-- [ ] PR description prepared (if upstream contribution)
+- [ ] PR description prepared (if upstream contribution); links to all tracking issues
 
 ## Boundaries
 
@@ -581,6 +703,9 @@ For XPU limitations (not bugs):
 - Running tests in pytorch_opencode_env conda environment
 - Analyzing and resolving missing test discovery
 - Aligning XPU @dtypesIfXPU decorators with CUDA @dtypesIfCUDA pattern
+- Enforcing hook-body parity with upstream (no assertions / checkers / branches removed)
+- Running the recursive word-level diff audit (`agent_space/per_function_diffs/`)
+- Delegating to the `submit_ut_issues` skill for filing intel/torch-xpu-ops issues, while requiring its mandatory Context section to cross-link the porting PR for every non-port-bug XPU failure
 - Enabling tests with known limitations tracked via intel/torch-xpu-ops issues
 - Restarting unsupported backends (like CUDNN_ATTENTION) for tracking
 - Handling nestedtensor/SDPA tests with XPU-specific constraints

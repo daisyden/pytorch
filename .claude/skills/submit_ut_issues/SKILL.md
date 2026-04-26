@@ -4,6 +4,8 @@
 
 This skill documents the workflow for analyzing XPU unit test failures, identifying root causes, classifying issues, applying fixes when test code is the problem, and submitting well-documented issues to intel/torch-xpu-ops.
 
+When the failure is observed during a porting or enablement PR on `intel/torch-xpu-ops`, every submitted issue MUST include a **Context** section that cross-links the PR (see Issue Template).
+
 ---
 
 ## Tools
@@ -208,6 +210,7 @@ pytest -v dynamo/test_b_xpu.py  # Separate invocation
 | Required Labels | Must include `skipped` | `["skipped", "module: ut"]` |
 | Label Limit | Max 100 per issue | Prune labels |
 | No Duplicates | Check existing first | Search before create |
+| **PR Context (when filed during a porting PR)** | **MUST include a Context section naming the PR by number, linking its URL, stating current PR state for the test, and what becomes possible once resolved** | See Issue Template |
 
 ### 5. Code Modification Constraints
 
@@ -618,6 +621,23 @@ Traceback:
 
 <Detailed explanation of WHY this failure occurs>
 
+## Context
+
+<REQUIRED whenever the failure is observed during a porting / enablement PR.
+This section makes the issue self-contained for reviewers landing on it from
+the PR, and lets future maintainers find the PR from the issue once the
+underlying gap is fixed. Include all three points below.>
+
+This issue tracks a gap identified during PR #<NNNN>, which <one-line
+description of the PR scope, e.g. "ports a batch of CUDA tests to XPU under
+`third_party/torch-xpu-ops/test/xpu/`">.
+
+In that PR, `<test_name(s)>` is currently <skipped|failing|enabled-but-failing>
+on XPU. Once <the underlying gap is resolved>, the <skip|failing assertion>
+in PR #<NNNN> (`<file path>`) can be <removed|will pass without further changes>.
+
+PR: https://github.com/intel/torch-xpu-ops/pull/<NNNN>
+
 ## Related PyTorch Issues
 
 - pytorch#XXXXX - <Title> (DISABLED if applicable)
@@ -633,6 +653,29 @@ Traceback:
 Intel: <relevant packages>
 PyTorch: <version>
 ```
+
+### Context Section: When Required
+
+The **Context** section is **MANDATORY** whenever the failure was observed during a porting or enablement effort that has (or will produce) a PR on `intel/torch-xpu-ops`. Concretely:
+
+- The failing test was newly added or newly enabled in a PR on `intel/torch-xpu-ops`.
+- The PR currently masks the failure with a skip / xfail / weakened assertion that should be reverted once the issue is fixed.
+- The PR enables the test "loud-fail" so this issue tracks the actual underlying gap.
+
+If the failure is observed outside any PR context (e.g. routine CI on `main`), the Context section may be omitted; otherwise it MUST contain:
+
+1. **PR cross-link** — issue body must name the PR by number (`PR #NNNN`) AND include a full URL to the PR.
+2. **Current PR state for this test** — `skipped`, `failing`, or `enabled-but-failing`, with the file path that holds the workaround.
+3. **What becomes possible once resolved** — explicitly state whether the skip can be removed, the assertion will pass without further code changes, etc.
+
+### After Filing
+
+When the Context section is used:
+
+- Add the issue URL to the relevant commit message in the porting PR.
+- Add an inline code comment next to the skip / weakened check pointing at the issue (`# Tracked in intel/torch-xpu-ops#NNNN`).
+- If the PR description has a "Tracking issues" section, append the new issue URL there. If no PR exists yet, queue the URL for inclusion in the eventual PR body.
+- Optionally, post a comment on the PR linking to the new issue so reviewers see it without scrolling the description.
 
 ---
 
