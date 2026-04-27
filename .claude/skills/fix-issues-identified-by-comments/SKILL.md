@@ -88,15 +88,48 @@ source ~/miniforge3/bin/activate ~/miniforge3/envs/pytorch_opencode_env
 cd third_party/torch-xpu-ops
 ```
 
-### Step 2: Identify Target Branch
+### Step 2: Identify Target Branch (CRITICAL — use exact PR head ref)
+
+**Never guess the branch name.** Always query `gh pr view` for the PR's
+actual `headRefName` and `headRepository`, and remember the exact string
+(it may contain slashes, e.g. `daisyden/dynamo_xpu`). You will need this
+exact name for both the fetch and the push.
 
 ```bash
-# For PR-based work, get the correct branch
 PR_NUM=3383
-# Fetch and checkout PR branch
-git fetch owner branch:owner/branch
-git checkout owner/branch
+PR_REPO=intel/torch-xpu-ops
+
+# Get the head branch metadata. headRefName is the literal branch name on
+# the head repo; it may contain slashes.
+gh pr view "$PR_NUM" --repo "$PR_REPO" \
+    --json headRefName,headRepositoryOwner,headRepository,commits \
+    --jq '{branch: .headRefName, owner: .headRepositoryOwner.login, repo: .headRepository.name, lastCommit: .commits[-1].oid}'
+
+# Example output:
+# {"branch":"daisyden/dynamo_xpu","owner":"daisyden","repo":"torch-xpu-ops","lastCommit":"da9f..."}
+
+PR_BRANCH="daisyden/dynamo_xpu"   # use the exact headRefName above
+PR_REMOTE="daisyden"               # the remote that points to head repo
+
+# Fetch using fully-qualified refspec so a slash-containing branch name
+# is not misinterpreted. Map it to a unique local tracking name.
+git fetch "$PR_REMOTE" "refs/heads/${PR_BRANCH}:refs/remotes/${PR_REMOTE}/pr-${PR_NUM}-head"
+
+# Verify your local tracking ref tip matches lastCommit from gh pr view.
+git log -1 --oneline "${PR_REMOTE}/pr-${PR_NUM}-head"
+
+# Create/reset a local working branch from the tracking ref.
+git checkout -B "pr-${PR_NUM}-fix" "${PR_REMOTE}/pr-${PR_NUM}-head"
 ```
+
+**Common pitfall**: `git fetch daisyden dynamo_xpu` (short form) will
+match any branch with a trailing component `dynamo_xpu` — it can pick
+up the wrong branch silently. Always use the fully-qualified refspec
+`refs/heads/<exact-name>:...` when the head ref contains slashes.
+
+**Sanity-check before continuing**: confirm `git rev-parse HEAD`
+matches the `lastCommit` reported by `gh pr view`. If they differ, you
+fetched the wrong branch — stop and re-check the head ref.
 
 ### Step 3: Analyze Comment Issues
 
@@ -192,14 +225,42 @@ Should I commit this fix?
 
 Wait for user response before committing.
 
-### Step 8: Push Changes
+### Step 8: Push Changes (CRITICAL — push to the PR's exact head ref)
 
-After user approves (if PR work):
+After user approves, push **to the same `headRefName`** captured in
+Step 2, using a fully-qualified destination refspec. Do NOT use the
+short form (`git push remote local-name`) — if your local branch name
+differs from the PR head ref (and it usually will when the PR head
+contains slashes), the short form silently creates a new branch on the
+remote instead of updating the PR.
 
 ```bash
-# Push to correct branch
-git push origin HEAD:branch-name
+# Push using fully-qualified refspec to the EXACT headRefName.
+git push "$PR_REMOTE" "HEAD:refs/heads/${PR_BRANCH}"
+
+# Example for PR #3383 whose headRefName is "daisyden/dynamo_xpu":
+# git push daisyden HEAD:refs/heads/daisyden/dynamo_xpu
 ```
+
+**Mandatory post-push verification** — confirm the PR now points at
+your new commit. If it does not, you pushed to the wrong branch.
+
+```bash
+gh pr view "$PR_NUM" --repo "$PR_REPO" --json commits \
+    --jq '.commits[-1] | {oid, messageHeadline}'
+
+# The oid must equal `git rev-parse HEAD` locally.
+```
+
+If the PR's last commit does not match your local HEAD:
+
+1. Re-run `gh pr view ... --json headRefName` to recover the correct ref.
+2. Inspect `git ls-remote "$PR_REMOTE"` to see which branch you actually
+   updated.
+3. Push again with the corrected fully-qualified refspec.
+4. Optionally delete the stray branch you created accidentally:
+   `git push "$PR_REMOTE" --delete <stray-branch-name>` (only after
+   confirming with the user).
 
 ## Common XPU Compatibility Patterns
 
@@ -279,20 +340,34 @@ event = Event()
 ## Constraints
 
 1. **PR branch first**: Always get correct PR branch before making changes
-2. **Context required**: ALWAYS read 15-30 lines before analysis
-3. **No pattern matching for analysis**: Use Read tool for semantic understanding
-4. **Deep analysis over shortcuts**: Understand code intent before fixing
-5. **Minimal fixes**: Only change what is necessary
-6. **Preserve test logic**: Fixes should not change test behavior
-7. **Ask before commit**: MANDATORY per agent-guidelines
-8. **Atomic commits**: One issue per commit
-9. **No force push to main**: Only to feature/PR branches
-10. **Verify consistency**: Check similar patterns before applying fix
+2. **Use exact headRefName**: Capture `headRefName` via `gh pr view` and
+   use it verbatim for both `git fetch refs/heads/<name>:...` and
+   `git push <remote> HEAD:refs/heads/<name>`. Never use the short
+   `git push remote branch` form for PR pushes — it can create a new
+   branch when the local name differs from the head ref (especially
+   when the head ref contains slashes).
+3. **Verify push landed on the PR**: After pushing, run `gh pr view
+   --json commits` and confirm the PR's last commit oid equals your
+   local HEAD. If not, fix the push before reporting success.
+4. **Context required**: ALWAYS read 15-30 lines before analysis
+5. **No pattern matching for analysis**: Use Read tool for semantic understanding
+6. **Deep analysis over shortcuts**: Understand code intent before fixing
+7. **Minimal fixes**: Only change what is necessary
+8. **Preserve test logic**: Fixes should not change test behavior
+9. **Ask before commit**: MANDATORY per agent-guidelines
+10. **Atomic commits**: One issue per commit
+11. **No force push to main**: Only to feature/PR branches
+12. **Verify consistency**: Check similar patterns before applying fix
 
 ## Validation Checklist
 
 Before considering a fix complete:
 
+- [ ] PR `headRefName` captured via `gh pr view` and used verbatim for
+      fetch and push
+- [ ] Local working branch is based on the exact `headRefName` tip
+      (verified `git rev-parse HEAD` against gh's `lastCommit` before
+      starting work)
 - [ ] Issue analyzed with context read (15-30 lines)
 - [ ] Root cause identified
 - [ ] Solution validated against similar patterns
@@ -300,7 +375,9 @@ Before considering a fix complete:
 - [ ] Changes verified with git diff
 - [ ] User approval obtained (MANDATORY)
 - [ ] Committed with descriptive message
-- [ ] Pushed to correct branch
+- [ ] Pushed using `HEAD:refs/heads/<headRefName>` (fully-qualified)
+- [ ] Post-push: `gh pr view --json commits` shows the new commit as
+      the PR's latest commit
 - [ ] Progress tracked in todowrite
 
 ## Example Complete Workflow
@@ -343,5 +420,11 @@ Should I commit this fix?
 
 ### Push
 ```bash
-git push daisyden dynamo_xpu
+# headRefName for PR #3383 is "daisyden/dynamo_xpu" (literal, contains slash)
+git push daisyden HEAD:refs/heads/daisyden/dynamo_xpu
+
+# Then verify the PR picked it up:
+gh pr view 3383 --repo intel/torch-xpu-ops --json commits \
+    --jq '.commits[-1].oid'
+# must equal: git rev-parse HEAD
 ```
