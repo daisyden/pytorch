@@ -2783,6 +2783,12 @@ def main() -> None:
         default="torch/csrc/inductor/aoti_torch/generated",
     )
     parser.add_argument(
+        "--headeronly-install-dir",
+        "--headeronly_install_dir",
+        help="output directory for header-only libraries (legacy parameter, unused)",
+        default="",
+    )
+    parser.add_argument(
         "--rocm",
         action="store_true",
         help="reinterpret CUDA as ROCm/HIP and adjust filepaths accordingly",
