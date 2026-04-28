@@ -115,11 +115,41 @@ TestModule.test_multiple_device_transfer = _test_multiple_device_transfer
 If test exists in `third_party/torch-xpu-ops/test/xpu/`:
 - Edit the existing test file directly
 - Keep changes localized to torch-xpu-ops repo
+- No `skip_list_common.py` change is required for an existing entry.
 
 If test does not exist:
 - Copy from pytorch/test to torch-xpu-ops/test/xpu/
 - Add `_xpu` suffix to file and class names
 - Use appropriate porting approach (see Porting Approaches)
+- **Register the new file in `test/xpu/skip_list_common.py` (see Step 2b)**. The op_ut CI runner does not auto-discover `test/xpu/*.py`; it iterates `skip_dict`. Skipping this step means the new tests silently never run in CI even though local pytest discovers them.
+
+### Step 2b: Register New File in `skip_list_common.py` (only when Step 2 created a new file)
+
+Local pytest collection is necessary but NOT sufficient — the CI op_ut suite enumerates files exclusively through `skip_dict` in `test/xpu/skip_list_common.py`. New files that are not added are silently dropped from CI coverage (this was the root cause of intel/torch-xpu-ops PR #3427's first run landing zero coverage of the new file).
+
+1. Open `third_party/torch-xpu-ops/test/xpu/skip_list_common.py`.
+2. Append at the end of `skip_dict` (before the closing `}`). The key is the file path **relative to `test/xpu/`**, matching sibling entries:
+
+```python
+skip_dict = {
+    ...
+    "functorch/test_aotdispatch_xpu.py": None,
+    "<subdir>/test_<module>_xpu.py": None,   # use None when no per-test skips needed
+}
+```
+
+3. If the port intentionally requires per-test skips (Approach 2 with hook-driven xfail/skip is preferred over `skip_dict` tuples; see Approach 2), use a tuple of substrings only when the alternative is filing infrastructure issues that cannot be resolved on this PR. Match existing styles such as `test_fake_tensor_xpu.py` and add a comment with the tracking-issue URL.
+4. Verify the file parses and the entry exists:
+
+```bash
+python3 -c "from importlib.util import spec_from_file_location, module_from_spec; \
+  s = spec_from_file_location('s', 'third_party/torch-xpu-ops/test/xpu/skip_list_common.py'); \
+  m = module_from_spec(s); s.loader.exec_module(m); \
+  k = '<subdir>/test_<module>_xpu.py'; \
+  assert k in m.skip_dict, f'{k} not registered'; print('OK', k, '->', m.skip_dict[k])"
+```
+
+5. Stage `skip_list_common.py` together with the new test file in the same atomic commit (Step 7). A commit that adds the test file without the registration is incorrect.
 
 ### Step 3: Run Test in Conda Environment
 
@@ -355,14 +385,19 @@ common_device_type.dtypesIfXPU = get_dtypesIf_mock("xpu")
 
 ### Issue 1: Test Not Discovered
 
-**Symptom:** Test exists in pytorch but not in torch-xpu-ops collection
+**Symptom:** Test exists in pytorch but not in torch-xpu-ops collection. Two distinct flavors:
+- (a) `pytest --collect-only test/xpu/<file>` finds nothing or errors out, **or**
+- (b) local `pytest --collect-only` works fine but the file produces no `op_ut_with_all.<module>.xml` artifact in CI (i.e. CI never ran the file even though local does).
 
 **Check:**
-1. Check if test exists in torch-xpu-ops test directory
-2. OpInfo skip decorators or device restrictions
-3. dtypesIf condition not including XPU
+1. **For flavor (b) first:** confirm the file's relative path is a key in `test/xpu/skip_list_common.py`'s `skip_dict`. The op_ut CI runner enumerates only files listed there — anything not in the dict is silently skipped at the suite level. This is the most common cause of "added a new file, CI is green, but the new tests never ran".
+2. Check if test exists in torch-xpu-ops test directory.
+3. OpInfo skip decorators or device restrictions.
+4. dtypesIf condition not including XPU.
 
-**Fix:** Apply Steps 2-5 above
+**Fix:**
+- Flavor (b): add the file to `skip_dict` per Step 2b.
+- Flavor (a): apply Steps 2-5 above.
 
 ### Issue 2: dtypesIf Setter Error
 
@@ -679,6 +714,7 @@ Do NOT file an issue for:
 
 - [ ] CUDA test located and mapped to XPU naming (_cuda -> _xpu)
 - [ ] XPU test updated/created in third_party/torch-xpu-ops/test/xpu/
+- [ ] **For new files: registered in `test/xpu/skip_list_common.py` `skip_dict` (Step 2b) — CI op_ut suite does not auto-discover files**
 - [ ] `dtypesIfXPU` import verified
 - [ ] @dtypesIfXPU aligned with CUDA @dtypesIfCUDA
 - [ ] **Hook body parity verified: no assertions / checkers / branches removed vs upstream**

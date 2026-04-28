@@ -333,6 +333,38 @@ conda activate pytorch_opencode_env
 python3 -m pytest /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py --collect-only 2>&1 | head -30
 ```
 
+#### Step B3.3: Register File in `skip_list_common.py` (MANDATORY for new files)
+
+Local pytest collection in B3.2 is necessary but NOT sufficient. The op_ut CI runner does not auto-discover files in `test/xpu/` — it iterates the `skip_dict` defined in `test/xpu/skip_list_common.py`. A new test file that is not added to `skip_dict` will silently never run in CI even though the PR is "green" because the suite never collects it. This was the root cause of intel/torch-xpu-ops PR #3427's first CI pass landing zero coverage of the new test file.
+
+Action:
+- Open `/home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/skip_list_common.py`.
+- Confirm the new file's relative-to-`test/xpu/` path is not already a key in `skip_dict` (a modification to an existing _xpu file does not need a new entry).
+- Append a new entry at the end of `skip_dict`, before the closing `}`. Use `None` as the value if no per-test skips are needed (the common case for a fresh port):
+
+```python
+skip_dict = {
+    ...
+    "functorch/test_aotdispatch_xpu.py": None,
+    "<subdir>/test_<module>_xpu.py": None,  # or just "test_<module>_xpu.py": None for files at test/xpu/ root
+}
+```
+
+- The key is the path **relative to `test/xpu/`** (e.g. `nn/test_dropout_xpu.py`, `dynamo/test_misc_xpu.py`, `test_linalg_xpu.py`). Match the convention of sibling entries.
+- If the port intentionally needs to skip specific tests, use a tuple of test-name substrings as the value (see existing entries like `test_fake_tensor_xpu.py` for the format), and add a comment with the tracking-issue URL.
+
+Verify after editing:
+
+```bash
+python3 -c "from importlib.util import spec_from_file_location, module_from_spec; \
+  s = spec_from_file_location('s', '/home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops/test/xpu/skip_list_common.py'); \
+  m = module_from_spec(s); s.loader.exec_module(m); \
+  k = '<subdir>/test_<module>_xpu.py'; \
+  assert k in m.skip_dict, f'{k} not registered'; print('OK', k, '->', m.skip_dict[k])"
+```
+
+The Phase B7 commit MUST include this `skip_list_common.py` change in the same atomic commit as the new test file, otherwise CI will run the suite without ever picking up the new tests.
+
 ### Phase B4: Fix Collection Errors
 ```bash
 # Diagnose any errors
@@ -405,13 +437,18 @@ git add third_party/torch-xpu-ops/test/xpu/test_<module>_xpu.py
 
 # Or if using separate torch-xpu-ops git:
 cd /home/daisydeng/daisy_pytorch/third_party/torch-xpu-ops
-git add test/xpu/test_<module>_xpu.py
+# IMPORTANT: stage BOTH the new test file AND the skip_list_common.py
+# update from Step B3.3 in the SAME commit. A new test file without a
+# skip_dict entry will never run in op_ut CI.
+git add test/xpu/test_<module>_xpu.py test/xpu/skip_list_common.py
 git commit -m "Add test_<module>_xpu.py: Port test_<module>.py to XPU backend
 
 - Ported test classes from pytorch PR branch
 - Added local ACCELERATOR_TYPE and onlyAccelerator definitions
 - Enabled XPU device tests with allow_xpu=True
 - Updated test instantiation structure
+- Registered the new file in test/xpu/skip_list_common.py so the op_ut
+  CI runner discovers and executes it
 
 Authored with Claude."
 
@@ -501,12 +538,13 @@ from test_functions import *
 - [ ] Missing imports have local workarounds
 - [ ] Python syntax validated with AST
 - [ ] Test collection succeeds (0 errors)
+- [ ] **For Scenario B: new file registered in `test/xpu/skip_list_common.py` `skip_dict` (Step B3.3)**
 - [ ] XPU instantiation added (allow_xpu=True)
 - [ ] Tests run to completion
 - [ ] Failures recorded and analyzed
 - [ ] Known issues searched in GitHub
 - [ ] Results documented
-- [ ] File committed (if applicable git tracking)
+- [ ] File committed (if applicable git tracking) — **commit includes both the test file and `skip_list_common.py`**
 
 ## Working Logic Summary
 
