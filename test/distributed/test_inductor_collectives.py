@@ -1728,7 +1728,7 @@ class TestCollectivesInductor(DynamoDistributedSingleProcTestCase):
         )
 
     @unittest.skipIf(not HAS_GPU, "Inductor+gpu needs triton and recent GPU arch")
-    @unittest.skipIf(not SM80OrLater, "bfloat16")
+    @unittest.skipIf(not SM80OrLater and not TEST_XPU, "bfloat16")
     def test_all_gather_bucket_path(self):
         def func(x, w, ag_0, ag_1, *, tag, ranks, group_size):
             # do some unrelated matmuls
