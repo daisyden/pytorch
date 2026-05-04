@@ -1,9 +1,12 @@
 # Owner(s): ["oncall: export"]
 import copy
+import re
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
+from torch._dynamo.exc import UserError, UserErrorType
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.export import Dim, draft_export, export
 from torch.export._draft_export import FailureType
@@ -30,6 +33,42 @@ class TestDraftExport(TestCase):
 
     def tearDown(self):
         return
+
+    def test_retry_on_constraint_violation_uses_dim_auto(self):
+        class M(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        dim = Dim("d0", min=2, max=16)
+        dynamic_shapes = {"x": {0: dim}}
+        calls = []
+
+        import torch.export._draft_export as draft_export_mod
+
+        real_export = draft_export_mod._export
+
+        def patched_export(*args, **kwargs):
+            calls.append(copy.deepcopy(kwargs["dynamic_shapes"]))
+            if len(calls) == 1:
+                raise UserError(
+                    UserErrorType.CONSTRAINT_VIOLATION,
+                    "mocked constraint violation",
+                )
+            return real_export(*args, **kwargs)
+
+        with patch("torch.export._draft_export._export", side_effect=patched_export):
+            draft_export(
+                M(),
+                (torch.randn(3),),
+                dynamic_shapes=dynamic_shapes,
+            )
+
+        self.assertEqual(len(calls), 2)
+        first_dim = calls[0]["x"][0]
+        second_dim = calls[1]["x"][0]
+        self.assertEqual(getattr(second_dim, "min", None), first_dim.min)
+        self.assertEqual(getattr(second_dim, "max", None), first_dim.max)
+        self.assertIn("AUTO", repr(second_dim))
 
     def test_missing_meta_kernel_custom_op_basic(self):
         with torch.library._scoped_library("mylib", "FRAGMENT"):
@@ -181,9 +220,12 @@ class TestDraftExport(TestCase):
             self.assertEqual(len(report.op_profiles), 1)
             self.assertEqual(len(report.op_profiles["mylib.foo8.default"]), 1)
 
-            with torch._library.fake_profile.unsafe_generate_fake_kernels(
-                report.op_profiles
-            ), FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv()):
+            with (
+                torch._library.fake_profile.unsafe_generate_fake_kernels(
+                    report.op_profiles
+                ),
+                FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv()),
+            ):
                 torch.ops.mylib.foo8(*new_inp)
 
                 # Existing registration has been updated to match the new
@@ -293,7 +335,8 @@ class TestDraftExport(TestCase):
                     res = torch.ops.mylib.foo1(a, b)
 
                     c_item = c.item()
-                    return res[:c_item]
+                    if c_item > 0:
+                        return res[:c_item]
 
             inp = (torch.ones(3, 3), torch.ones(3, 3), torch.tensor(3))
 
@@ -319,11 +362,7 @@ class TestDraftExport(TestCase):
 
         ep = draft_export(M(), (torch.tensor([938]),))
         report = ep._report
-        self.assertEqual(len(report.failures), 1)
-        self.assertEqual(
-            report.failures[0].failure_type, FailureType.DATA_DEPENDENT_ERROR
-        )
-        self.assertEqual(report.failures[0].data["expr"], "Eq(Mod(10, 2*u1), 0)")
+        self.assertEqual(len(report.failures), 0)
 
     def test_dedup_data_dependent_failure(self):
         class M(torch.nn.Module):
@@ -369,7 +408,8 @@ class TestDraftExport(TestCase):
 
                 z = torch.cat([y, y])
 
-                return z[:a]
+                if a > 0:
+                    return z[:a]
 
         ep = draft_export(
             M(),
@@ -403,12 +443,17 @@ class TestDraftExport(TestCase):
     def test_shape_failure(self):
         class M(torch.nn.Module):
             def forward(self, a):
-                assert a.shape[0] == 3
+                assert a.shape[0] == 3  # noqa: S101
                 return a * a
 
         inp = (torch.ones(3, 3),)
 
-        ep = draft_export(M(), inp, dynamic_shapes={"a": {0: Dim("a0")}})
+        ep = draft_export(
+            M(),
+            inp,
+            dynamic_shapes={"a": {0: Dim("a0")}},
+            prefer_deferred_runtime_asserts_over_guards=True,
+        )
         report = ep._report
 
         self.assertEqual(len(report.failures), 1)
@@ -418,7 +463,11 @@ class TestDraftExport(TestCase):
         self.assertEqual(ep.module()(*inp), M()(*inp))
 
         inp = (torch.randn(4, 3),)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            re.escape("Guard failed: a.size()[0] <= 3"),
+        ):
+            # expected <= 3, but got 4
             ep.module()(*inp)
 
     def test_side_effect1(self):

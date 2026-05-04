@@ -2,7 +2,6 @@
 import contextlib
 import logging
 import re
-from typing import Optional
 from unittest.mock import patch
 
 import sympy
@@ -311,7 +310,7 @@ extern "C"
   }
   if (need_pack) {
     // When the number of gemm is greater than the number of pack,
-    // the pack overhead can be overlaped.
+    // the pack overhead can be overlapped.
     int64_t thresh_size = 64;
     need_pack = kvSize >= thresh_size && qSize >= thresh_size;
     if (need_pack) {
@@ -792,7 +791,7 @@ class CppFlexAttentionTemplate(CppTemplate):
             return ""
 
         if start_offset == -1:
-            start_offset = getattr(self, len_attr)
+            start_offset = self.len_score_other
 
         length = getattr(self, len_attr)
         for i in range(length):
@@ -814,7 +813,7 @@ class CppFlexAttentionTemplate(CppTemplate):
         from ..loop_body import LoopBody
         from ..utils import sympy_index_symbol_with_prefix, SymT
         from ..virtualized import V
-        from .cpp import CppKernelProxy, KernelGroup
+        from .cpp import CppKernelProxy, KernelGroup, ParallelDepth
 
         kernel_group = KernelGroup()
         kernel_input_args = {
@@ -883,7 +882,15 @@ class CppFlexAttentionTemplate(CppTemplate):
         var_sizes_list.append((var_sizes, ()))
 
         cpp_kernel_proxy.codegen_loop_bodies(bodies, var_sizes_list)
-        kernel_group.finalize_kernel(cpp_kernel_proxy, [])
+
+        def max_parallel_depth():
+            return ParallelDepth(parallel_depth=0, start_depth=0)
+
+        # This loop is not parallelized since it is not the outermost loop.
+        with patch.object(
+            cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
+        ):
+            kernel_group.finalize_kernel(cpp_kernel_proxy, [])
         output_code = kernel_group.loops_code.getvalue()
 
         var_q_symbol, var_kv_symbol = self.block_vars
@@ -955,8 +962,8 @@ class CppFlexAttentionTemplate(CppTemplate):
     def render(  # type: ignore[override,return]
         self,
         kernel,
-        template_buffer_node: Optional[ir.CppTemplateBuffer] = None,
-        epilogue_nodes: Optional[list[ir.IRNode]] = None,
+        template_buffer_node: ir.CppTemplateBuffer | None = None,
+        epilogue_nodes: list[ir.IRNode] | None = None,
         **kwargs,
     ) -> str:
         if epilogue_nodes is not None and epilogue_nodes != []:
@@ -977,6 +984,7 @@ class CppFlexAttentionTemplate(CppTemplate):
         self.input_dtype = query.layout.dtype
 
         num_threads = parallel_num_threads()
+        assert isinstance(self.output_node, ir.IRNode)
         buf_out = TensorBox.create(self.output_node)
         if template_buffer_node is not None:
             buf_out = template_buffer_node
@@ -986,9 +994,9 @@ class CppFlexAttentionTemplate(CppTemplate):
             value=value,
             kv_num_blocks=self.input_nodes[3],
             kv_indices=self.input_nodes[4],
-            full_kv_num_blocks=self.input_nodes[5]
-            if not self.no_full_kv_block
-            else None,
+            full_kv_num_blocks=(
+                self.input_nodes[5] if not self.no_full_kv_block else None
+            ),
             full_kv_indices=self.input_nodes[6] if not self.no_full_kv_block else None,
             score_mod_other_buffers=self.score_mod_other_buffers,
             mask_mod_other_buffers=self.mask_mod_other_buffers,

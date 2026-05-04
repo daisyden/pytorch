@@ -1,5 +1,3 @@
-# mypy: allow-untyped-defs
-
 """Testing utilities for Dynamo, providing a specialized TestCase class and test running functionality.
 
 This module extends PyTorch's testing framework with Dynamo-specific testing capabilities.
@@ -18,10 +16,12 @@ import os
 import re
 import sys
 import unittest
-from typing import Union
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.testing
+from torch._dynamo import polyfills
 from torch._logging._internal import trace_log
 from torch.testing._internal.common_utils import (  # type: ignore[attr-defined]
     IS_WINDOWS,
@@ -36,7 +36,7 @@ from . import config, reset, utils
 log = logging.getLogger(__name__)
 
 
-def run_tests(needs: Union[str, tuple[str, ...]] = ()) -> None:
+def run_tests(needs: str | tuple[str, ...] = ()) -> None:
     from torch.testing._internal.common_utils import run_tests
 
     if TEST_WITH_TORCHDYNAMO or TEST_WITH_CROSSREF:
@@ -60,6 +60,7 @@ def run_tests(needs: Union[str, tuple[str, ...]] = ()) -> None:
                 importlib.import_module(need)
             except ImportError:
                 return
+
     run_tests()
 
 
@@ -85,6 +86,8 @@ class TestCase(TorchTestCase):
 
     def setUp(self) -> None:
         self._prior_is_grad_enabled = torch.is_grad_enabled()
+        self._prior_nested_graph_breaks = config.nested_graph_breaks
+        config.nested_graph_breaks = True
         super().setUp()
         reset()
         utils.counters.clear()
@@ -94,13 +97,31 @@ class TestCase(TorchTestCase):
     def tearDown(self) -> None:
         trace_log.removeHandler(self.handler)
         for k, v in utils.counters.items():
-            print(k, v.most_common())
+            log.debug("%s %s", k, v.most_common())
         reset()
         utils.counters.clear()
+        torch._C._autograd._saved_tensors_hooks_enable()
         super().tearDown()
         if self._prior_is_grad_enabled is not torch.is_grad_enabled():
             log.warning("Running test changed grad mode")
             torch.set_grad_enabled(self._prior_is_grad_enabled)
+        config.nested_graph_breaks = self._prior_nested_graph_breaks
+
+    def before_cuda_memory_leak_check(self) -> None:
+        reset()
+        utils.counters.clear()
+
+    def assertEqual(self, x: Any, y: Any, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        if (
+            config.debug_disable_compile_counter
+            and isinstance(x, utils.CompileCounterInt)
+            or isinstance(y, utils.CompileCounterInt)
+        ):
+            return
+        return super().assertEqual(x, y, *args, **kwargs)
+
+    # assertExpectedInline might also need to be disabled for wrapped nested
+    # graph break tests
 
 
 class CPythonTestCase(TestCase):
@@ -136,13 +157,16 @@ class CPythonTestCase(TestCase):
     assertRegex = unittest.TestCase.assertRegex
     assertNotRegex = unittest.TestCase.assertNotRegex
     assertCountEqual = unittest.TestCase.assertCountEqual
-    assertMultiLineEqual = unittest.TestCase.assertMultiLineEqual
-    assertSequenceEqual = unittest.TestCase.assertSequenceEqual
+    assertMultiLineEqual = polyfills.assert_multi_line_equal
+    assertSequenceEqual = polyfills.assert_sequence_equal
     assertListEqual = unittest.TestCase.assertListEqual
     assertTupleEqual = unittest.TestCase.assertTupleEqual
     assertSetEqual = unittest.TestCase.assertSetEqual
-    assertDictEqual = unittest.TestCase.assertDictEqual
+    # pyrefly: ignore [bad-override]
+    assertDictEqual = polyfills.assert_dict_equal
+    # pyrefly: ignore [bad-override]
     assertRaises = unittest.TestCase.assertRaises
+    # pyrefly: ignore [bad-override]
     assertRaisesRegex = unittest.TestCase.assertRaisesRegex
     assertWarns = unittest.TestCase.assertWarns
     assertWarnsRegex = unittest.TestCase.assertWarnsRegex
@@ -150,15 +174,22 @@ class CPythonTestCase(TestCase):
     fail = unittest.TestCase.fail
     failureException = unittest.TestCase.failureException
 
-    def compile_fn(self, fn, backend, nopython):
+    def compile_fn(
+        self,
+        fn: Callable[..., Any],
+        backend: str | Callable[..., Any],
+        nopython: bool,
+    ) -> Callable[..., Any]:
         # We want to compile only the test function, excluding any setup code
         # from unittest
+
         method = getattr(self, self._testMethodName)
-        method = torch._dynamo.optimize(backend, nopython=nopython)(method)
+        method = torch._dynamo.optimize(backend, error_on_graph_break=nopython)(method)
+
         setattr(self, self._testMethodName, method)
         return fn
 
-    def _dynamo_test_key(self):
+    def _dynamo_test_key(self) -> str:
         suffix = super()._dynamo_test_key()
         test_cls = self.__class__
         test_file = inspect.getfile(test_cls).split(os.sep)[-1].split(".")[0]
@@ -184,7 +215,7 @@ class CPythonTestCase(TestCase):
         if m:
             test_py_ver = tuple(map(int, m.group().removeprefix(prefix).split("_")))
             py_ver = sys.version_info[:2]
-            if py_ver < test_py_ver:
+            if py_ver != test_py_ver:
                 expected = ".".join(map(str, test_py_ver))
                 got = ".".join(map(str, py_ver))
                 raise unittest.SkipTest(
@@ -202,3 +233,7 @@ class CPythonTestCase(TestCase):
                 enable_trace_unittest=True,
             ),
         )
+
+    # pyrefly: ignore [implicit-any]
+    def wrap_with_policy(self, method_name: str, policy: Callable) -> None:
+        pass

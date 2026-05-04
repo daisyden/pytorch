@@ -1,4 +1,4 @@
-// Philox Counter based RNG implemntation for Metal
+// Philox Counter based RNG implementation for Metal
 // Borrowed from aten/src/ATen/core/PhiloxRNGEngine.h
 // Which in turn borrowed from
 // http://www.thesalmons.org/john/random123/papers/random123sc11.pdf
@@ -33,7 +33,7 @@ uint4 single_round(uint4 ctr, uint2 key) {
   constexpr uint kPhiloxSB = 0xCD9E8D57;
   auto rc0 = mulhilo(kPhiloxSA, ctr.x);
   auto rc1 = mulhilo(kPhiloxSB, ctr.z);
-  return uint4(rc1.y ^ ctr.y ^ key.x, rc1.x, rc0.y ^ ctr.w ^ key.y, rc0.x);
+  return uint4(rc1.x ^ ctr.y ^ key.x, rc1.y, rc0.x ^ ctr.w ^ key.y, rc0.y);
 }
 
 uint4 multiple_rounds(uint4 ctr, uint2 key, uint rounds) {

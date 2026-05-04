@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Any, final, TYPE_CHECKING
 
 import torch
+from torch._library.opaque_object import is_opaque_type
 from torch._ops import HigherOrderOperator, OpOverload
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.export.graph_signature import (
@@ -59,6 +60,8 @@ def _check_val(node: torch.fx.Node) -> None:
             return True
         elif isinstance(val, Iterable):
             return all(_check_correct_val(x) for x in val)
+        elif is_opaque_type(type(val)):
+            return True
         return False
 
     def _no_returns(op):
@@ -99,13 +102,24 @@ class _VerifierMeta(type):
         if bases:
             if "check" in attrs or "_check_graph_module" in attrs:
                 raise SyntaxError("Overriding method check is not allowed.")
-            assert "dialect" in attrs and attrs["dialect"] != "ATEN"
+            if "dialect" not in attrs or attrs["dialect"] == "ATEN":
+                raise AssertionError(
+                    f"subclass must define dialect != 'ATEN', got {attrs.get('dialect')}"
+                )
         else:
-            assert "check" in attrs
-            assert "_check_graph_module" in attrs
-            assert attrs["dialect"] == "ATEN"
+            if "check" not in attrs:
+                raise AssertionError("base class must define 'check' method")
+            if "_check_graph_module" not in attrs:
+                raise AssertionError(
+                    "base class must define '_check_graph_module' method"
+                )
+            if attrs["dialect"] != "ATEN":
+                raise AssertionError(
+                    f"base class dialect must be 'ATEN', got {attrs['dialect']}"
+                )
 
-        assert isinstance(attrs["dialect"], str)
+        if not isinstance(attrs["dialect"], str):
+            raise AssertionError(f"dialect must be str, got {type(attrs['dialect'])}")
         ret = type.__new__(metacls, name, bases, attrs)
         metacls._registry[attrs["dialect"]] = ret  # type: ignore[assignment]
         return ret
@@ -191,18 +205,21 @@ class Verifier(metaclass=_VerifierMeta):
                 ret = self.allowed_getattr_types()
             else:
                 ret = self.allowed_getattr_types_for_subgm()
-            assert not any(t is object for t in ret)
+            if any(t is object for t in ret):
+                raise AssertionError("allowed_getattr_types must not contain 'object'")
             return ret
 
         def _check_valid_op(op) -> None:
             def _allowed_builtin_ops() -> list:
                 ret = self.allowed_builtin_ops()
-                assert all(inspect.isbuiltin(op) for op in ret)
+                if not all(inspect.isbuiltin(op) for op in ret):
+                    raise AssertionError("allowed_builtin_ops must all be builtins")
                 return ret
 
             def _allowed_op_types() -> tuple[type[Any], ...]:
                 ret = self.allowed_op_types()
-                assert not any(t is object for t in ret)
+                if any(t is object for t in ret):
+                    raise AssertionError("allowed_op_types must not contain 'object'")
                 return ret
 
             # TODO Remove this allowlist.
@@ -215,6 +232,8 @@ class Verifier(metaclass=_VerifierMeta):
                 torch.sym_min,
                 torch.sym_not,
                 torch.sym_sqrt,
+                torch.sym_sum,
+                torch.export.custom_ops._call_custom_autograd_function_in_pre_dispatch,
                 # TODO (tmanlaibaatar)
                 # Predispatch export is able to contain autograd ops.
                 # These will be modeled as HOO later
@@ -222,6 +241,18 @@ class Verifier(metaclass=_VerifierMeta):
                 torch.amp.autocast_mode._enter_autocast,
                 torch.amp.autocast_mode._exit_autocast,
                 torch.fx.experimental.symbolic_shapes.cast_symbool_to_symint_guardless,
+                torch._functorch.predispatch._add_batch_dim,
+                torch._functorch.predispatch._remove_batch_dim,
+                torch._functorch.predispatch._vmap_increment_nesting,
+                torch._functorch.predispatch._vmap_decrement_nesting,
+                torch._functorch.predispatch.lazy_load_decompositions,
+                torch._functorch.predispatch._make_dual,
+                torch._functorch.predispatch._unpack_dual,
+                torch._functorch.predispatch._jvp_increment_nesting,
+                torch._functorch.predispatch._jvp_decrement_nesting,
+                torch._functorch.predispatch._unwrap_for_grad,
+                torch._functorch.predispatch._enter_dual_level,
+                torch._functorch.predispatch._exit_dual_level,
             )
 
             if not isinstance(op, _allowed_op_types()):
@@ -274,6 +305,13 @@ class Verifier(metaclass=_VerifierMeta):
                             return isinstance(getattr(attr, name, None), ty)
 
                         if type(attr).__name__ == "LoweredBackendModule":
+                            if (
+                                _is_type("backend_id", str)
+                                and hasattr(attr, "original_module")
+                                and hasattr(attr, "module_name")
+                                and getattr(attr, "backend_id", None) == "aoti"
+                            ):
+                                continue
                             if (
                                 _is_type("backend_id", str)
                                 and _is_type("processed_bytes", bytes)
@@ -344,9 +382,16 @@ def _verify_exported_program_signature(exported_program) -> None:
     ]
 
     if len(input_node_names) != len(gs.input_specs):
+        input_spec_names = [
+            spec.arg.name for spec in gs.input_specs if hasattr(spec.arg, "name")
+        ]
+        missing_in_specs = set(input_node_names) - set(input_spec_names)
+        missing_in_graph = set(input_spec_names) - set(input_node_names)
         raise SpecViolationError(
             f"Number of graph inputs ({len(input_node_names)}) "
-            f"does not match number of inputs in the graph signature ({len(gs.input_specs)})"
+            f"does not match number of inputs in the graph signature ({len(gs.input_specs)})\n"
+            f"Placeholders missing input_specs: {missing_in_specs}\n"
+            f"Input_specs missing placeholders: {missing_in_graph}"
         )
 
     for input_spec, node in zip(gs.input_specs, input_node_names):
@@ -447,22 +492,34 @@ def _verify_exported_program_signature(exported_program) -> None:
 
     # Check outputs
     output_node = list(exported_program.graph.nodes)[-1]
-    assert output_node.op == "output"
+    if output_node.op != "output":
+        raise AssertionError(f"last node must be output, got {output_node.op}")
     output_nodes = [
         arg.name if isinstance(arg, torch.fx.Node) else arg
         for arg in output_node.args[0]
     ]
 
     if len(output_nodes) != len(gs.output_specs):
+        output_spec_names = [
+            spec.arg.name if hasattr(spec.arg, "name") else str(spec.arg)
+            for spec in gs.output_specs
+        ]
+        missing_out_specs = set(output_nodes) - set(output_spec_names)
+        missing_out_graph = set(output_spec_names) - set(output_nodes)
         raise SpecViolationError(
             f"Number of output nodes {len(output_nodes)} is different "
-            "Than the number of outputs specified by the graph signature: \n"
-            f"Number of mutated buffers: {len(gs.buffers_to_mutate)}. \n"
-            f"Number of user outputs: {len(gs.user_outputs)}. \n"
+            f"Than the number of outputs specified by the graph signature: {len(gs.output_specs)}\n"
+            f"Nodes missing output_specs: {missing_out_specs}\n"
+            f"Output_specs missing nodes: {missing_out_graph}"
         )
 
     num_tokens = len(gs.output_tokens)
-    end = len(gs.buffers_to_mutate) + len(gs.user_inputs_to_mutate) + num_tokens
+    end = (
+        len(gs.buffers_to_mutate)
+        + len(gs.parameters_to_mutate)
+        + len(gs.user_inputs_to_mutate)
+        + num_tokens
+    )
     mutate_nodes: list[str] = output_nodes[num_tokens:end]
     user_output_nodes = output_nodes[end : end + len(gs.user_outputs)]
 
@@ -473,6 +530,13 @@ def _verify_exported_program_signature(exported_program) -> None:
                     f"Buffer output {mutation_node} does not point to a buffer that exists. \n"
                     f"Dict of buffers that are mutated, in order: {gs.buffers_to_mutate} \n"
                     f"Buffer nodes available: {gs.buffers} \n"
+                )
+        elif mutation_node in gs.parameters_to_mutate:
+            if gs.parameters_to_mutate[mutation_node] not in gs.parameters:
+                raise SpecViolationError(
+                    f"Parameter output {mutation_node} does not point to a parameter that exists. \n"
+                    f"Dict of parameters that are mutated, in order: {gs.parameters_to_mutate} \n"
+                    f"Parameter nodes available: {gs.parameters} \n"
                 )
         elif mutation_node in gs.user_inputs_to_mutate:
             if gs.user_inputs_to_mutate[mutation_node] not in gs.user_inputs:

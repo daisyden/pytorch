@@ -15,7 +15,7 @@ namespace at::vec {
 // accessed as `at::vec`.
 inline namespace CPU_CAPABILITY {
 
-#if defined(CPU_CAPABILITY_SVE)
+#if defined(CPU_CAPABILITY_SVE256)
 
 #define VEC_INT_SVE_TEMPLATE(vl, bit)                                         \
   template <>                                                                 \
@@ -32,7 +32,9 @@ inline namespace CPU_CAPABILITY {
     static constexpr size_type size() {                                       \
       return vl;                                                              \
     }                                                                         \
-    Vectorized() {}                                                           \
+    Vectorized() {                                                            \
+      values = svdup_n_s##bit(0);                                             \
+    }                                                                         \
     Vectorized(svint##bit##_t v) : values(v) {}                               \
     Vectorized(int##bit##_t val) {                                            \
       values = svdup_n_s##bit(val);                                           \
@@ -491,7 +493,7 @@ Vectorized<int8_t> inline operator>>(
   return svasr_s8_x(ptrue, a, svreinterpret_u8_s8(b));
 }
 
-#endif // defined(CPU_CAPABILITY_SVE)
+#endif // defined(CPU_CAPABILITY_SVE256)
 
 } // namespace CPU_CAPABILITY
 } // namespace at::vec

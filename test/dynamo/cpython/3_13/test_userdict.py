@@ -4,6 +4,9 @@
 # ruff: noqa
 # flake8: noqa
 
+# Test copied from
+# https://raw.githubusercontent.com/python/cpython/refs/tags/v3.13.5/Lib/test/test_userdict.py
+
 import sys
 import torch
 import torch._dynamo.test_case
@@ -203,8 +206,9 @@ class UserDictTest(mapping_tests.TestHashMappingProtocol):
         self.assertEqual(list(collections.UserDict(dict={'a': 42}).items()),
                          [('dict', {'a': 42})])
         self.assertRaises(TypeError, collections.UserDict, 42)
-        self.assertRaises(TypeError, collections.UserDict, (), ())
-        self.assertRaises(TypeError, collections.UserDict.__init__)
+        with torch._dynamo.error_on_graph_break(False):
+            self.assertRaises(TypeError, collections.UserDict, (), ())
+            self.assertRaises(TypeError, collections.UserDict.__init__)
 
     def test_update(self):
         for kw in 'self', 'dict', 'other', 'iterable':

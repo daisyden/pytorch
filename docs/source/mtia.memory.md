@@ -1,6 +1,6 @@
 # torch.mtia.memory
 
-The MTIA backend is implemented out of the tree, only interfaces are be defined here.
+The MTIA backend is implemented out of the tree, only interfaces are defined here.
 
 ```{eval-rst}
 .. automodule:: torch.mtia.memory
@@ -15,5 +15,7 @@ The MTIA backend is implemented out of the tree, only interfaces are be defined 
     :toctree: generated
     :nosignatures:
 
+    max_memory_allocated
     memory_stats
+    memory_allocated
 ```

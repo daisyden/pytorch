@@ -8,7 +8,8 @@ from torch.distributed.pipelining import pipe_split, SplitPoint
 
 class ExampleCode(torch.nn.Module):
     def __init__(self, d_hid, splits=2):
-        assert splits <= 4
+        if not (splits <= 8):
+            raise AssertionError(f"Expected splits <= 8, got {splits}")
         super().__init__()
         self.splits = splits
         self.mm_param0 = torch.nn.Parameter(torch.randn(d_hid, d_hid))
@@ -17,6 +18,10 @@ class ExampleCode(torch.nn.Module):
         self.lin0 = torch.nn.Linear(d_hid, d_hid)
         self.lin1 = torch.nn.Linear(d_hid, d_hid)
         self.lin2 = torch.nn.Linear(d_hid, d_hid)
+        self.lin3 = torch.nn.Linear(d_hid, d_hid)
+        self.lin4 = torch.nn.Linear(d_hid, d_hid)
+        self.lin5 = torch.nn.Linear(d_hid, d_hid)
+        self.lin6 = torch.nn.Linear(d_hid, d_hid)
 
     def forward(self, x):
         x = torch.mm(x, self.mm_param0)
@@ -35,6 +40,22 @@ class ExampleCode(torch.nn.Module):
             pipe_split()
             x = self.lin2(x)
             x = torch.relu(x)
+        if self.splits > 4:
+            pipe_split()
+            x = self.lin3(x)
+            x = torch.relu(x)
+        if self.splits > 5:
+            pipe_split()
+            x = self.lin4(x)
+            x = torch.relu(x)
+        if self.splits > 6:
+            pipe_split()
+            x = self.lin5(x)
+            x = torch.relu(x)
+        if self.splits > 7:
+            pipe_split()
+            x = self.lin6(x)
+            x = torch.relu(x)
         return x
 
 
@@ -43,7 +64,8 @@ class ModelWithKwargs(torch.nn.Module):
     DEFAULT_BATCH_SIZE = 256
 
     def __init__(self, d_hid: int = DEFAULT_DHID, splits=2):
-        assert splits <= 4
+        if not (splits <= 8):
+            raise AssertionError(f"Expected splits <= 8, got {splits}")
         super().__init__()
         self.splits = splits
         self.mm_param0 = torch.nn.Parameter(torch.randn(d_hid, d_hid))
@@ -52,6 +74,10 @@ class ModelWithKwargs(torch.nn.Module):
         self.lin1 = torch.nn.Linear(d_hid, d_hid)
         self.lin2 = torch.nn.Linear(d_hid, d_hid)
         self.lin3 = torch.nn.Linear(d_hid, d_hid)
+        self.lin4 = torch.nn.Linear(d_hid, d_hid)
+        self.lin5 = torch.nn.Linear(d_hid, d_hid)
+        self.lin6 = torch.nn.Linear(d_hid, d_hid)
+        self.lin7 = torch.nn.Linear(d_hid, d_hid)
 
     def forward(self, x, y=torch.zeros(DEFAULT_BATCH_SIZE, DEFAULT_DHID)):
         x = torch.mm(x, self.mm_param0)
@@ -69,6 +95,22 @@ class ModelWithKwargs(torch.nn.Module):
         if self.splits > 3:
             pipe_split()
             x = self.lin3(x)
+            x = torch.relu(x)
+        if self.splits > 4:
+            pipe_split()
+            x = self.lin4(x)
+            x = torch.relu(x)
+        if self.splits > 5:
+            pipe_split()
+            x = self.lin5(x)
+            x = torch.relu(x)
+        if self.splits > 6:
+            pipe_split()
+            x = self.lin6(x)
+            x = torch.relu(x)
+        if self.splits > 7:
+            pipe_split()
+            x = self.lin7(x)
             x = torch.relu(x)
         return x
 
@@ -146,6 +188,30 @@ class MultiMLP(torch.nn.Module):
         return x
 
 
+class TwoInputOutputOp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, weight: torch.Tensor):
+        return input, weight
+
+    @staticmethod
+    def backward(ctx, grad_input, grad_weight):
+        return grad_input, grad_weight
+
+
+# Model with multi-output intermediates
+class MultiInterMediateModel(torch.nn.Module):
+    def __init__(self, weight_shape: list[int]):
+        super().__init__()
+        self.shape = weight_shape
+        self.w = torch.nn.Parameter(torch.randn(*weight_shape))
+
+    def forward(self, x):
+        a, b = torch.split(x, self.shape, dim=1)
+        a, w = TwoInputOutputOp.apply(a, self.w)
+        a = torch.matmul(a, w)
+        return a * b
+
+
 # Multi-MLP with kwargs model
 class MultiMLPKwargs(torch.nn.Module):
     def __init__(self, d_hid: int, n_layers: int = 2):
@@ -211,10 +277,10 @@ class MLPModuleWithDw(torch.nn.Module):
         self.fc2_weight = torch.nn.Parameter(torch.randn(d_hid, d_hid))
         self.fc2_bias = torch.nn.Parameter(torch.randn(d_hid))
 
-        torch.nn.init.uniform_(self.fc1_weight, -0.01, 0.01)
-        torch.nn.init.uniform_(self.fc2_weight, -0.01, 0.01)
-        torch.nn.init.uniform_(self.fc1_bias, -0.01, 0.01)
-        torch.nn.init.uniform_(self.fc2_bias, -0.01, 0.01)
+        torch.nn.init.uniform_(self.fc1_weight, -0.001, 0.001)
+        torch.nn.init.uniform_(self.fc2_weight, -0.001, 0.001)
+        torch.nn.init.uniform_(self.fc1_bias, -0.001, 0.001)
+        torch.nn.init.uniform_(self.fc2_bias, -0.001, 0.001)
 
         self.cached_context = {}
         self.cached_context["fc1"] = []

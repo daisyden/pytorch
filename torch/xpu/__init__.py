@@ -6,17 +6,36 @@ Intel GPU optimization.
 This package is lazily initialized, so you can always import it, and use
 :func:`is_available()` to determine if your system supports XPU.
 """
+
+from __future__ import annotations
+
+import dataclasses
+import os
 import threading
 import traceback
+import warnings
+from ctypes import byref, c_uint32, c_void_p, cast, pointer
 from functools import lru_cache
-from typing import Any, Callable, Optional, Union
+from typing import Any, NewType, TYPE_CHECKING
 
 import torch
 import torch._C
-from torch import device as _device
 from torch._utils import _dummy_type, _LazySeedTracker
 
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from torch.types import Device
+
 from ._utils import _get_device_index
+from .graphs import (
+    graph,
+    graph_pool_handle,
+    is_current_stream_capturing,
+    make_graphed_callables,
+    XPUGraph,
+)
 from .streams import Event, Stream
 
 
@@ -27,9 +46,19 @@ _queued_calls: list[
     tuple[Callable[[], None], list[str]]
 ] = []  # don't invoke these until initialization occurs
 _is_in_bad_fork = getattr(torch._C, "_xpu_isInBadFork", lambda: False)
-_device_t = Union[_device, str, int, None]
 _lazy_seed_tracker = _LazySeedTracker()
 default_generators: tuple[torch._C.Generator] = ()  # type: ignore[assignment]
+_cached_device_count: int | None = None
+
+
+@dataclasses.dataclass
+class _ZesDeviceInfo:
+    device_handle: c_void_p
+    subdevice_id: int | None = None
+    is_integrated: bool = False
+
+
+_cached_zes_device_infos: list[_ZesDeviceInfo] = []
 
 
 def _is_compiled() -> bool:
@@ -52,17 +81,196 @@ else:
         raise NotImplementedError("PyTorch was compiled without XPU support")
 
 
-@lru_cache(maxsize=1)
+def _parse_visible_devices() -> list[int]:
+    r"""Parse ``ZE_AFFINITY_MASK`` and return visible device ordinals.
+
+    Returns a list of non-negative device ordinals specified by the mask.
+    When the mask is unset, returns ``[0, 1, ..., 127]`` (the maximum range
+    for ``int8_t`` device indices).  Returns an empty list for unsupported
+    COMPOSITE-style masks (e.g. ``"0.0,0.1"``).
+    """
+    var = os.getenv("ZE_AFFINITY_MASK")
+    if var is None:
+        # DeviceIndex is stored as int8_t, so valid indices are 0–127
+        # (up to 128 devices). Return the full range when no mask is set.
+        return list(range(128))
+
+    visible_devices: list[int] = []
+    for elem in var.split(","):
+        try:
+            x = int(elem.strip())
+        except ValueError:
+            # A non-integer token (e.g. "0.0" in COMPOSITE-mode format)
+            # means the mask is unsupported here; signal that by returning
+            # an empty list.
+            return []
+        if x >= 0 and x not in visible_devices:
+            visible_devices.append(x)
+    return visible_devices
+
+
+def _enum_zes_device_infos(visible_mask: list[int]) -> int:
+    r"""Enumerate visible XPU devices via Level Zero Sysman and cache their info.
+
+    Enumerates devices from the first Level Zero Sysman driver and counts those
+    whose logical index appears in *visible_mask*.  Only devices listed in
+    the visible mask participate in counting.
+    The populated ``_cached_zes_device_infos`` list is indexed by PyTorch
+    device ordinal.
+
+    Discrete GPUs (dGPUs) take priority: if any visible dGPU is found, only
+    dGPUs are counted; integrated GPUs (iGPUs) are counted only when no
+    visible dGPU exists.
+
+    For tiled dGPUs (``numSubdevices > 0``), the counting depends on
+    ``ZE_FLAT_DEVICE_HIERARCHY``:
+
+    - **FLAT / COMBINED** (default): each sub-device is exposed as a
+      separate top-level device and counted individually.
+    - **COMPOSITE**: sub-devices are hidden; the whole physical device
+      counts as one.
+
+    Returns the visible device count, or a negative value on failure.
+    """
+    try:
+        import pyzes  # type: ignore[import]
+    except ImportError:
+        return -1
+
+    global _cached_zes_device_infos
+
+    def _zes_check_warn(rc: int, msg: str) -> bool:
+        """Return True if the call failed (rc != ZE_RESULT_SUCCESS) after issuing a warning."""
+        if rc != pyzes.ZE_RESULT_SUCCESS:
+            warnings.warn(msg, stacklevel=3)
+        return rc != pyzes.ZE_RESULT_SUCCESS
+
+    if _zes_check_warn(pyzes.zesInit(0), "Can't initialize Level Zero Sysman"):
+        return -1
+
+    driver_count = c_uint32(0)
+    if _zes_check_warn(
+        pyzes.zesDriverGet(byref(driver_count), None),
+        "Can't get Level Zero Sysman driver count",
+    ):
+        return -1
+    if driver_count.value == 0:
+        return 0
+
+    drivers = (pyzes.zes_driver_handle_t * driver_count.value)()
+    if _zes_check_warn(
+        pyzes.zesDriverGet(byref(driver_count), drivers),
+        "Can't get Level Zero Sysman driver handles",
+    ):
+        return -1
+
+    device_count = c_uint32(0)
+    if _zes_check_warn(
+        pyzes.zesDeviceGet(drivers[0], byref(device_count), None),
+        "Can't get Level Zero Sysman device count",
+    ):
+        return -1
+
+    devices = (pyzes.zes_device_handle_t * device_count.value)()
+    if _zes_check_warn(
+        pyzes.zesDeviceGet(drivers[0], byref(device_count), devices),
+        "Can't get Level Zero Sysman device handles",
+    ):
+        return -1
+
+    # --- Count visible dGPUs and iGPUs ---
+    ZES_DEVICE_PROPERTY_FLAG_INTEGRATED = 1 << 0
+    expose_subdevices = os.getenv("ZE_FLAT_DEVICE_HIERARCHY") != "COMPOSITE"
+
+    _cached_zes_device_infos.clear()
+    visible = set(visible_mask)
+    logical_index = 0
+    num_igpu = 0
+    num_dgpu = 0
+
+    for device in devices:
+        props = pyzes.zes_device_properties_t()
+        props.stype = pyzes.ZES_STRUCTURE_TYPE_DEVICE_PROPERTIES
+        ext_props = pyzes.zes_device_ext_properties_t()
+        ext_props.stype = pyzes.ZES_STRUCTURE_TYPE_DEVICE_EXT_PROPERTIES
+        props.pNext = cast(pointer(ext_props), c_void_p)
+        if _zes_check_warn(
+            pyzes.zesDeviceGetProperties(device, byref(props)),
+            "Can't get Level Zero Sysman device properties",
+        ):
+            return -1
+
+        is_integrated = bool(ext_props.flags & ZES_DEVICE_PROPERTY_FLAG_INTEGRATED)
+
+        # Tiled dGPUs in FLAT/COMBINED mode expose each sub-device as a
+        # separate logical device; everything else counts as one slot.
+        tiled = not is_integrated and props.numSubdevices > 0 and expose_subdevices
+        num_slots = props.numSubdevices if tiled else 1
+
+        for slot in range(num_slots):
+            if logical_index in visible:
+                _cached_zes_device_infos.append(
+                    _ZesDeviceInfo(
+                        device_handle=device,
+                        subdevice_id=slot if tiled else None,
+                        is_integrated=is_integrated,
+                    )
+                )
+                if is_integrated:
+                    num_igpu += 1
+                else:
+                    num_dgpu += 1
+            logical_index += 1
+
+    # dGPUs take priority; strip iGPUs when at least one dGPU is visible.
+    if num_dgpu and num_igpu:
+        _cached_zes_device_infos = [
+            info for info in _cached_zes_device_infos if not info.is_integrated
+        ]
+    return num_dgpu or num_igpu
+
+
+def _raw_device_count_zes(visible_mask: list[int]) -> int:
+    r"""Return the visible XPU device count via Level Zero Sysman, or negative on failure."""
+    return _enum_zes_device_infos(visible_mask)
+
+
+def _device_count_zes() -> int:
+    r"""Return the number of visible XPU devices, or -1 on failure."""
+    visible_devices = _parse_visible_devices()
+    if not visible_devices:
+        return -1
+    return _raw_device_count_zes(visible_devices)
+
+
 def device_count() -> int:
-    r"""Return the number of XPU device available."""
+    r"""
+    Return the number of XPU device available.
+
+    .. note:: This API will NOT poison fork if Level Zero Sysman discovery succeeds.
+        See :ref:`multiprocessing-poison-fork-note` for more details.
+    """
     if not _is_compiled():
         return 0
-    return torch._C._xpu_getDeviceCount()
+    global _cached_device_count
+    if _cached_device_count is not None:
+        return _cached_device_count
+    if _initialized or hasattr(_tls, "is_initializing"):
+        count = torch._C._xpu_getDeviceCount()
+    else:
+        zes_count = _device_count_zes()
+        count = torch._C._xpu_getDeviceCount() if zes_count < 0 else zes_count
+    # Do not cache the device count prior to XPU initialization, because
+    # the number of devices can change due to changes to ZE_AFFINITY_MASK
+    # setting prior to XPU initialization.
+    if _initialized:
+        _cached_device_count = count
+    return count
 
 
 def is_available() -> bool:
     r"""Return a bool indicating if XPU is currently available."""
-    # This function nerver throws.
+    # This function never throws.
     return device_count() > 0
 
 
@@ -76,12 +284,23 @@ def is_bf16_supported(including_emulation: bool = True) -> bool:
     )
 
 
+def is_tf32_supported() -> bool:
+    r"""Return a bool indicating if the current XPU device supports dtype tf32."""
+    if not is_available():
+        return False
+    # On Intel Xe architecture and newer, TF32 operations can be accelerated
+    # through DPAS (Dot Product Accumulate Systolic) instructions. Therefore,
+    # TF32 support can be determined by checking whether the device supports
+    # subgroup matrix multiply-accumulate operations.
+    return torch.xpu.get_device_properties().has_subgroup_matrix_multiply_accumulate
+
+
 def is_initialized():
     r"""Return whether PyTorch's XPU state has been initialized."""
     return _initialized and not _is_in_bad_fork()
 
 
-def _lazy_call(callable, **kwargs):
+def _lazy_call(callable, **kwargs) -> None:
     if is_initialized():
         callable()
     else:
@@ -95,7 +314,7 @@ def _lazy_call(callable, **kwargs):
             _queued_calls.append((callable, traceback.format_stack()))
 
 
-def init():
+def init() -> None:
     r"""Initialize PyTorch's XPU state.
     This is a Python API about lazy initialization that avoids initializing
     XPU until the first time it is accessed. Does nothing if the XPU state is
@@ -104,12 +323,12 @@ def init():
     _lazy_init()
 
 
-def _lazy_init():
+def _lazy_init() -> None:
     global _initialized, _queued_calls
     if is_initialized() or hasattr(_tls, "is_initializing"):
         return
     with _initialization_lock:
-        # This test was was protected via GIL. Double-check whether XPU has
+        # This test was protected via GIL. Double-check whether XPU has
         # already been initialized.
         if is_initialized():
             return
@@ -145,7 +364,7 @@ def _lazy_init():
 
 
 class _DeviceGuard:
-    def __init__(self, index: int):
+    def __init__(self, index: int) -> None:
         self.idx = index
         self.prev_idx = -1
 
@@ -165,7 +384,7 @@ class device:
             this argument is a negative integer or ``None``.
     """
 
-    def __init__(self, device: Any):
+    def __init__(self, device: Any) -> None:
         self.idx = _get_device_index(device, optional=True)
         self.prev_idx = -1
 
@@ -187,12 +406,12 @@ class device_of(device):
         obj (Tensor or Storage): object allocated on the selected device.
     """
 
-    def __init__(self, obj):
+    def __init__(self, obj) -> None:
         idx = obj.get_device() if obj.is_xpu else -1
         super().__init__(idx)
 
 
-def set_device(device: _device_t) -> None:
+def set_device(device: Device) -> None:
     r"""Set the current device.
 
     Args:
@@ -205,7 +424,7 @@ def set_device(device: _device_t) -> None:
         torch._C._xpu_setDevice(device)
 
 
-def get_device_name(device: Optional[_device_t] = None) -> str:
+def get_device_name(device: Device = None) -> str:
     r"""Get the name of a device.
 
     Args:
@@ -221,7 +440,7 @@ def get_device_name(device: Optional[_device_t] = None) -> str:
 
 
 @lru_cache(None)
-def get_device_capability(device: Optional[_device_t] = None) -> dict[str, Any]:
+def get_device_capability(device: Device = None) -> dict[str, Any]:
     r"""Get the xpu capability of a device.
 
     Args:
@@ -232,23 +451,50 @@ def get_device_capability(device: Optional[_device_t] = None) -> dict[str, Any]:
             (default).
 
     Returns:
-        Dict[str, Any]: the xpu capability dictionary of the device
+        dict[str, Any]: the xpu capability dictionary of the device
     """
     props = get_device_properties(device)
-    # pybind service attributes are no longer needed and their presence breaks
-    # the further logic related to the serialization of the created dictionary.
-    # In particular it filters out `<bound method PyCapsule._pybind11_conduit_v1_ of _XpuDeviceProperties..>`
-    # to fix Triton tests.
-    # This field appears after updating pybind to 2.13.6.
+    # Only keep attributes that are safe for dictionary serialization.
+    serializable_types = (int, float, bool, str, type(None), list, tuple, dict)
     return {
-        prop: getattr(props, prop)
-        for prop in dir(props)
-        if not prop.startswith(("__", "_pybind11_"))
+        key: value
+        for key in dir(props)
+        if not key.startswith("__")
+        and isinstance((value := getattr(props, key)), serializable_types)
     }
 
 
-def get_device_properties(device: Optional[_device_t] = None) -> _XpuDeviceProperties:
-    r"""Get the properties of a device.
+def get_device_properties(
+    device: Device = None,
+) -> _XpuDeviceProperties:
+    r"""Get the properties of a device. Returns _XpuDeviceProperties containing the following device properties:
+
+    - ``name`` (str): device name.
+    - ``platform_name`` (str): SYCL platform name.
+    - ``vendor`` (str): device vendor.
+    - ``device_id`` (int): device identifier (product ID).
+    - ``driver_version`` (str): driver version.
+    - ``version`` (str): runtime version.
+    - ``max_compute_units`` (int): number of parallel compute units.
+    - ``gpu_eu_count`` (int): number of EUs (Execution Unit).
+    - ``max_work_group_size``: (int): maximum number of work-items permitted in a work-group.
+    - ``max_num_sub_groups`` (int): maximum number of sub-groups supported in a work-group.
+    - ``memory_clock_rate`` (int) maximum clock rate of device's global memory in MHz.
+    - ``memory_bus_width`` (int) maximum bus width between device and memory in bits.
+    - ``sub_group_sizes``: (list[int]): a list of supported sub-group sizes.
+    - ``local_mem_size`` (int): device local memory capacity that can be allocated per work-group in bytes.
+    - ``has_fp16`` (bool): whether float16 dtype is supported.
+    - ``has_fp64`` (bool): whether float64 dtype is supported.
+    - ``has_atomic64`` (bool): whether 64-bit atomic operations are supported.
+    - ``has_bfloat16_conversions`` (bool): whether bfloat16 conversions are supported.
+    - ``has_subgroup_matrix_multiply_accumulate`` (bool): whether DPAS (Dot Product Accumulate Systolic) is supported.
+    - ``has_subgroup_matrix_multiply_accumulate_tensor_float32`` (bool): whether DPAS with tf32 inputs is supported.
+    - ``has_subgroup_2d_block_io`` (bool): whether 2D block I/O for efficient matrix multiplication is supported.
+    - ``total_memory`` (int): device global memory in bytes.
+    - ``gpu_subslice_count`` (int): number of subslice.
+    - ``architecture`` (int): device architecture identifier (experimental).
+    - ``type`` (str): device type, e.g. 'cpu', 'gpu', accelerator', 'host', 'unknown'.
+    - ``uuid`` (Any): device UUID (Universal Unique ID), 16 bytes.
 
     Args:
         device (torch.device or int or str): device for which to return the
@@ -268,7 +514,7 @@ def current_device() -> int:
     return torch._C._xpu_getDevice()
 
 
-def _get_device(device: Union[int, str, torch.device]) -> torch.device:
+def _get_device(device: int | str | torch.device) -> torch.device:
     r"""Return the torch.device type object from the passed in device.
 
     Args:
@@ -279,6 +525,22 @@ def _get_device(device: Union[int, str, torch.device]) -> torch.device:
     elif isinstance(device, int):
         device = torch.device("xpu", device)
     return device
+
+
+def can_device_access_peer(device: Device, peer: Device) -> bool:
+    r"""Query whether a device can access a peer device's memory.
+
+    Args:
+        device (torch.device or int or str): selected device.
+        peer (torch.device or int or str): peer device to query access to.
+
+    Returns:
+        bool: ``True`` if ``device`` can access ``peer``, ``False`` otherwise.
+    """
+    _lazy_init()
+    device = _get_device_index(device, optional=True)
+    peer = _get_device_index(peer, optional=True)
+    return torch._C._xpu_canDeviceAccessPeer(device, peer)
 
 
 class StreamContext:
@@ -292,13 +554,14 @@ class StreamContext:
             ``None``.
     .. note:: Streams are per-device.
     """
-    cur_stream: Optional["torch.xpu.Stream"]
 
-    def __init__(self, stream: Optional["torch.xpu.Stream"]):
+    cur_stream: torch.xpu.Stream | None
+
+    def __init__(self, stream: torch.xpu.Stream | None) -> None:
         self.stream = stream
         self.idx = _get_device_index(None, True)
         if self.idx is None:
-            self.idx = -1
+            self.idx = -1  # pyrefly: ignore [bad-assignment]
 
     def __enter__(self):
         cur_stream = self.stream
@@ -323,7 +586,7 @@ class StreamContext:
         torch.xpu.set_stream(self.src_prev_stream)
 
 
-def stream(stream: Optional["torch.xpu.Stream"]) -> StreamContext:
+def stream(stream: torch.xpu.Stream | None) -> StreamContext:
     r"""Wrap around the Context-manager StreamContext that selects a given stream.
 
     Arguments:
@@ -332,7 +595,7 @@ def stream(stream: Optional["torch.xpu.Stream"]) -> StreamContext:
     return StreamContext(stream)
 
 
-def _set_stream_by_id(stream_id, device_index, device_type):
+def _set_stream_by_id(stream_id, device_index, device_type) -> None:
     r"""set stream specified by the stream id, device index and device type
 
     Args: stream_id (int): not visible to the user, used to assigned to the specific stream.
@@ -346,8 +609,8 @@ def _set_stream_by_id(stream_id, device_index, device_type):
     )
 
 
-def set_stream(stream: Stream):
-    r"""Set the current stream.This is a wrapper API to set the stream.
+def set_stream(stream: Stream) -> None:
+    r"""Set the current stream. This is a wrapper API to set the stream.
         Usage of this function is discouraged in favor of the ``stream``
         context manager.
 
@@ -365,7 +628,7 @@ def set_stream(stream: Stream):
     )
 
 
-def current_stream(device: Optional[_device_t] = None) -> Stream:
+def current_stream(device: Device = None) -> Stream:
     r"""Return the currently selected :class:`Stream` for a given device.
 
     Args:
@@ -383,9 +646,7 @@ def current_stream(device: Optional[_device_t] = None) -> Stream:
     )
 
 
-def get_stream_from_external(
-    data_ptr: int, device: Optional[_device_t] = None
-) -> Stream:
+def get_stream_from_external(data_ptr: int, device: Device = None) -> Stream:
     r"""Return a :class:`Stream` from an external SYCL queue.
 
     This function is used to wrap SYCL queue created in other libraries in order
@@ -410,7 +671,7 @@ def get_stream_from_external(
     )
 
 
-def synchronize(device: _device_t = None) -> None:
+def synchronize(device: Device = None) -> None:
     r"""Wait for all kernels in all streams on a XPU device to complete.
 
     Args:
@@ -438,7 +699,7 @@ def get_gencode_flags() -> str:
     arch_list = get_arch_list()
     if len(arch_list) == 0:
         return ""
-    return f'-device {",".join(arch for arch in arch_list)}'
+    return f"-device {','.join(arch for arch in arch_list)}"
 
 
 def _get_generator(device: torch.device) -> torch._C.Generator:
@@ -454,7 +715,7 @@ def _get_generator(device: torch.device) -> torch._C.Generator:
 
 
 def _set_rng_state_offset(
-    offset: int, device: Union[int, str, torch.device] = "xpu"
+    offset: int, device: int | str | torch.device = "xpu"
 ) -> None:
     r"""Set the random number generator state offset of the specified GPU.
 
@@ -465,14 +726,14 @@ def _set_rng_state_offset(
     """
     final_device = _get_device(device)
 
-    def cb():
+    def cb() -> None:
         default_generator = _get_generator(final_device)
         default_generator.set_offset(offset)
 
     _lazy_call(cb)
 
 
-def _get_rng_state_offset(device: Union[int, str, torch.device] = "xpu") -> int:
+def _get_rng_state_offset(device: int | str | torch.device = "xpu") -> int:
     r"""Return the random number generator state offset of the specified GPU.
 
     Args:
@@ -490,16 +751,23 @@ def _get_rng_state_offset(device: Union[int, str, torch.device] = "xpu") -> int:
 
 # import here to avoid circular import
 from .memory import (
+    change_current_allocator,
     empty_cache,
+    get_per_process_memory_fraction,
     max_memory_allocated,
     max_memory_reserved,
     mem_get_info,
     memory_allocated,
     memory_reserved,
+    memory_snapshot,
     memory_stats,
     memory_stats_as_nested_dict,
+    MemPool,
     reset_accumulated_memory_stats,
     reset_peak_memory_stats,
+    set_per_process_memory_fraction,
+    use_mem_pool,
+    XPUPluggableAllocator,
 )
 from .random import (
     get_rng_state,
@@ -514,10 +782,15 @@ from .random import (
 )
 
 
+_POOL_HANDLE = NewType("_POOL_HANDLE", tuple[int, int])
 __all__ = [
     "Event",
     "Stream",
     "StreamContext",
+    "XPUPluggableAllocator",
+    "XPUGraph",
+    "can_device_access_peer",
+    "change_current_allocator",
     "current_device",
     "current_stream",
     "default_generators",
@@ -530,14 +803,20 @@ __all__ = [
     "get_device_name",
     "get_device_properties",
     "get_gencode_flags",
+    "get_per_process_memory_fraction",
     "get_rng_state",
     "get_rng_state_all",
     "get_stream_from_external",
+    "graph",
+    "graph_pool_handle",
     "init",
     "initial_seed",
     "is_available",
     "is_bf16_supported",
+    "is_current_stream_capturing",
     "is_initialized",
+    "is_tf32_supported",
+    "make_graphed_callables",
     "manual_seed",
     "manual_seed_all",
     "max_memory_allocated",
@@ -545,13 +824,17 @@ __all__ = [
     "mem_get_info",
     "memory_allocated",
     "memory_reserved",
+    "memory_snapshot",
     "memory_stats",
     "memory_stats_as_nested_dict",
+    "MemPool",
+    "use_mem_pool",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
     "seed",
     "seed_all",
     "set_device",
+    "set_per_process_memory_fraction",
     "set_rng_state",
     "set_rng_state_all",
     "set_stream",

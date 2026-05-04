@@ -36,7 +36,7 @@ TypeParser::TypeParser(std::vector<std::string>& pythonStrs)
 // instruction. In nested type, the lowest level type will be at the beginning
 // of the type list. It is possible to parse it without worrying about
 // ordering, but it also introduces 1) extra cost to process nested type to
-// the correct order 2) lost the benifit that the instruction order is likely
+// the correct order 2) lost the benefit that the instruction order is likely
 // problematic if type list parsing fails.
 std::vector<TypePtr> TypeParser::parseList() {
   std::vector<TypePtr> typePtrs;
@@ -158,7 +158,6 @@ TypePtr TypeParser::parse() {
         " is not supported in the parser, ",
         "or the token is in wrong format.");
   }
-  return nullptr;
 }
 
 // NamedTuple custom type will be following structure:
@@ -243,7 +242,6 @@ TypePtr TypeParser::parseCustomType() {
       TORCH_CHECK(
           false, "Can't find definition for the type: ", qualified_name);
     }
-    return nullptr;
   }
 }
 

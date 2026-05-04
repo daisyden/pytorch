@@ -178,6 +178,81 @@ class TestUnflatten(TestCase):
             id(getattr(unflattened_module.sub_net, "2")),
         )
 
+    def test_unflatten_shared_submodule_reorder(self):
+        """Test that _reorder_submodules handles @N-suffixed FQNs correctly.
+
+        When modules are shared (aliased), PyTorch assigns @N suffixes to
+        duplicate entries in _modules. The fqn_order dict (built from
+        fqn_list) filters out @N entries, so _reorder_submodules must fall
+        back to the base FQN for ordering.
+        """
+
+        class Block(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.linear = torch.nn.Linear(10, 10)
+
+            def forward(self, x):
+                return self.linear(x)
+
+        class Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                shared_block = Block()
+                self.blocks = torch.nn.Sequential(
+                    shared_block,
+                    torch.nn.ReLU(),
+                    shared_block,
+                    torch.nn.ReLU(),
+                )
+
+            def forward(self, x):
+                return self.blocks(x)
+
+        eager_module = Model()
+        inps = (torch.rand(2, 10),)
+        export_module = export(eager_module, inps, {}, strict=True)
+        unflattened_module = unflatten(export_module)
+        self.compare_outputs(eager_module, unflattened_module, inps)
+        # Verify shared identity is preserved
+        self.assertEqual(
+            id(getattr(unflattened_module.blocks, "0")),
+            id(getattr(unflattened_module.blocks, "2")),
+        )
+
+    def test_assert_tensor_metadata_stack(self):
+        class N(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = torch.randn(3)
+
+            def forward(self, x, y):
+                x = x.to(dtype=torch.int32)
+                y = y.to(dtype=torch.int32)
+                x = x + self.a
+                return x + y
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.n = N()
+
+            def forward(self, x, y):
+                x = x * x
+                y = y * y
+                return self.n(x, y)
+
+        m = M()
+        ep = torch.export.export(m, (torch.randn(3), torch.randn(3)))
+        for node in ep.graph.nodes:
+            if node.target == torch.ops.aten._assert_tensor_metadata.default:
+                self.assertEqual(len(node.meta.get("nn_module_stack")), 2)
+
+        uep = torch.export.unflatten(ep)
+
+        inp = (torch.randn(3), torch.randn(3))
+        self.assertTrue(torch.allclose(uep(*inp), m(*inp)))
+
     @unittest.skipIf(IS_WINDOWS, "Windows not supported for this test")
     @skipIfTorchDynamo("Non strict mode is not meant to run with dynamo")
     def test_unflatten_preserve_signature(self):
@@ -233,7 +308,7 @@ class TestUnflatten(TestCase):
             new_inps = *inps, torch.rand(2, 3)
             with self.assertRaisesRegex(
                 TypeError,
-                "There is no flat args adapter sepcified. Are you sure you are calling this with the right arguments?",
+                "There is no flat args adapter specified. Are you sure you are calling this with the right arguments?",
             ):
                 unflattened(new_inps)
 
@@ -326,9 +401,10 @@ class TestUnflatten(TestCase):
 
         export_module = torch.export.export(Mod(), (torch.randn((2, 3)),), strict=True)
         with self.assertRaisesRegex(
-            RuntimeError,
-            escape("Expected input at *args[0].shape[0] to be equal to 2, but got 6"),
+            AssertionError,
+            escape("Guard failed: x.size()[0] == 2"),
         ):
+            # expected 2, but got 6
             export_module.module()(torch.randn(6, 6))
 
         unflattened = unflatten(export_module)
@@ -631,8 +707,6 @@ class TestUnflatten(TestCase):
             export_module.module(), unflattened, (torch.randn((2, 3)),)
         )
 
-    # skip connection is not supported yet
-    @unittest.expectedFailure
     def test_unflatten_skipped_call_module(self):
         class C(torch.nn.Module):
             def __init__(self):
@@ -670,7 +744,30 @@ class TestUnflatten(TestCase):
         # The call chain looks like this:
         # A -> B -> C -> A.d
         ep = torch.export.export(a, (torch.randn(3),), strict=False)
-        unflatten(ep)
+        ufm = unflatten(ep)
+        self.assertExpectedInline(
+            str(ufm.graph_module.code).strip(),
+            """\
+def forward(self, x):
+    b = self.b(x);  x = None
+    return (b,)""",
+        )
+        self.assertExpectedInline(
+            str(ufm.b.graph_module.code).strip(),
+            """\
+def forward(self, x):
+    c = self.c(x)
+    add = torch.ops.aten.add.Tensor(c, x);  c = x = None
+    return add""",
+        )
+        self.assertExpectedInline(
+            str(ufm.b.c.graph_module.code).strip(),
+            """\
+def forward(self, x):
+    cos = torch.ops.aten.cos.default(x);  x = None
+    sin = torch.ops.aten.sin.default(cos);  cos = None
+    return sin""",
+        )
 
     def test_nested_leaf_non_strict(self):
         class Leaf(torch.nn.Module):
@@ -879,7 +976,7 @@ class TestUnflatten(TestCase):
         fn_count_sym_size = lambda graph: [node.target for node in graph.nodes].count(
             torch.ops.aten.sym_size.int
         )
-        self.assertEqual(fn_count_sym_size(unflat.graph), 3)
+        self.assertEqual(fn_count_sym_size(unflat.graph), 1)
         self.assertEqual(fn_count_sym_size(unflat.m1.graph), 1)
         self.assertEqual(fn_count_sym_size(unflat.m2.graph), 0)
 
@@ -1003,6 +1100,27 @@ class TestUnflatten(TestCase):
         )
         unf = torch.export.unflatten(ep)
         inp = (torch.randn(3), None)
+        self.assertTrue(torch.allclose(unf(*inp), M1()(*inp)))
+
+    def test_unflatten_root_module_type(self) -> None:
+        class M(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x + x
+
+        class M1(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.m = M()
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.m(x)
+
+        inp = (torch.randn(3),)
+        ep = torch.export.export(M1(), inp)
+        unf = torch.export.unflatten(ep)
+        self.assertIsNotNone(unf.type_name())
+        self.assertEqual(unf.type_name().split(".")[-1], "M1")
+        self.assertEqual(unf.m.type_name().split(".")[-1], "M")
         self.assertTrue(torch.allclose(unf(*inp), M1()(*inp)))
 
 

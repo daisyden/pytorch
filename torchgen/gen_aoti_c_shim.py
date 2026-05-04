@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import difflib
 import os
 import textwrap
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from torchgen.aoti.fallback_ops import inductor_fallback_ops
+from torchgen.aoti.fallback_ops import aten_shimified_ops, inductor_fallback_ops
 from torchgen.api.types import DispatcherSignature
 from torchgen.api.types.signatures import CppSignature, CppSignatureGroup
 from torchgen.context import method_with_native_function
@@ -23,6 +24,7 @@ from torchgen.model import (
     OperatorName,
     OptionalType,
     Type,
+    Variant,
 )
 from torchgen.utils import FileManager, mapMaybe
 
@@ -160,7 +162,8 @@ def convert_arg_type_and_name(
     elif isinstance(typ, ListType):
         # Need to explicitly pass the list as pointer + length
         c_types, names, aten_types, _ = convert_arg_type_and_name(typ.elem, name)
-        assert len(c_types) == 1, "ListType with unsupported element type " + repr(typ)
+        if len(c_types) != 1:
+            raise AssertionError(f"ListType with unsupported element type {repr(typ)}")
 
         # The list content should never be modified
         c_types[0] = f"const {c_types[0]}*"
@@ -173,7 +176,8 @@ def convert_arg_type_and_name(
         if atype == "bool":
             # no converter from std::vector<bool> to c10::ArrayRef<bool>
             # construct std::array<bool, N> instead
-            assert typ.size is not None
+            if typ.size is None:
+                raise AssertionError("bool ListType must have a size")
             callsite_exprs.append(f"pointer_to_list<{typ.size}>({name})")
         elif atype == "at::Tensor" and not is_write:
             callsite_exprs.append(
@@ -210,7 +214,16 @@ def gen_arguments(
     callsite_exprs: list[str] = []
     for arg in flat_arguments:
         if arg.name in skipped_args:
-            callsite_exprs.append("std::nullopt")
+            # Pass the arg's schema default when available (e.g. "false" for
+            # a bool arg with default=False), so non-optional args with defaults
+            # can be versioned too. Fall back to std::nullopt for optional args
+            # with no default (matches historical behavior).
+            if arg.default is not None:
+                from torchgen.api.cpp import default_expr
+
+                callsite_exprs.append(default_expr(arg.default, arg.type, symint=False))
+            else:
+                callsite_exprs.append("std::nullopt")
             continue
         new_types, names, _, new_callsite_exprs = convert_arg_type_and_name(
             arg.type, arg.name, arg.is_write
@@ -248,13 +261,19 @@ def gen_returns(schema: FunctionSchema) -> tuple[list[str], list[str]]:
 
     ret_pointer_can_be_null = False
     unambiguous_name = schema.name.unambiguous_name()
-    for name in [
-        "_scaled_dot_product_flash_attention",
-        "_scaled_dot_product_efficient_attention",
+    for name in (
+        "_functional_sym_constrain_range",
         "_scaled_dot_product_cudnn_attention",
+        "_scaled_dot_product_efficient_attention_backward",
+        "_scaled_dot_product_efficient_attention",
+        "_scaled_dot_product_flash_attention",
         "_scaled_dot_product_fused_attention_overrideable",
+        "_thhn_fused_lstm_cell_backward_impl",
         "convolution_backward",
-    ]:
+        "grid_sampler_2d_backward",
+        "grid_sampler_3d_backward",
+        "linear_backward",
+    ):
         if name in unambiguous_name:
             ret_pointer_can_be_null = True
             break
@@ -262,7 +281,8 @@ def gen_returns(schema: FunctionSchema) -> tuple[list[str], list[str]]:
     callsite_exprs: list[str] = []
     for idx, ret in enumerate(schema.returns):
         tmp = "tmp_result" if len(names) == 1 else f"std::get<{idx}>(tmp_result)"
-        assert isinstance(ret.type, BaseType)
+        if not isinstance(ret.type, BaseType):
+            raise AssertionError(f"Expected BaseType for return, got {type(ret.type)}")
         rval = convert_return(ret.type, tmp)
         if ret_pointer_can_be_null:
             callsite_exprs.append(f"if ({names[idx]}) {{ *{names[idx]} = {rval}; }}")
@@ -292,18 +312,18 @@ def gen_declaration_and_definition(
     # {"v2" : ["new_arg1"], "v3": ["new_arg2, new_arg3"]}.
     indexed_version_info: dict[int, list[str]] = {1: []}
     for ver_str, new_args in sorted(version_info.items()):
-        assert ver_str.startswith("v"), (
-            f"Version number for {base_name} is {ver_str}, not starting with 'v'"
-        )
+        if not ver_str.startswith("v"):
+            raise AssertionError(
+                f"Version number for {base_name} is {ver_str}, not starting with 'v'"
+            )
         try:
             ver_id = int(ver_str[1:])
         except ValueError as e:
             raise AssertionError(
                 f"Version number for {base_name} is {ver_str}, not a valid integer after 'v'"
             ) from e
-        assert ver_id not in indexed_version_info, (
-            f"{ver_str} for {base_name} has already been defined"
-        )
+        if ver_id in indexed_version_info:
+            raise AssertionError(f"{ver_str} for {base_name} has already been defined")
         indexed_version_info[ver_id] = new_args
 
     declarations: list[str] = []
@@ -378,27 +398,50 @@ def gen_static_dispatch_backend_call_signature(
         cpp_sig = cpp_sigs.symint_signature
     else:
         cpp_sig = cpp_sigs.signature
-    assert cpp_sig is not None
+    if cpp_sig is None:
+        raise AssertionError(f"No cpp signature found for {f.func.name}")
     return cpp_sig
 
 
 def gen_static_dispatch_backend_call(
     f: NativeFunction,
-    backend_index: BackendIndex,
+    backend_index: BackendIndex | None = None,
 ) -> str:
     sig = DispatcherSignature.from_schema(f.func)
     cpp_sig = gen_static_dispatch_backend_call_signature(sig, f)
-    return f"at::{backend_index.dispatch_key.lower()}::{cpp_sig.name()}"
+
+    if backend_index is None:
+        # Check if this is a symint function and if the function only has method variants
+        if sig.symint and f.func.has_symint():
+            has_function_variant = Variant.function in f.variants
+
+            if not has_function_variant:
+                # Functions with both function and method variants can use the at::{*}_symint version
+                # (e.g., narrow -> at::narrow_symint), BUT
+                # Method-only functions with symint parameters should use at::symint:: namespace
+                # Remove the _symint suffix since at::symint:: namespace uses the base name
+                # (e.g., new_empty -> at::symint::new_empty<c10::SymInt>)
+                base_name = cpp_sig.name()
+                base_name = base_name.removesuffix("_symint")  # Remove "_symint" suffix
+                return f"at::symint::{base_name}<c10::SymInt>"
+
+        return f"at::{cpp_sig.name()}"
+    else:
+        return f"at::{backend_index.dispatch_key.lower()}::{cpp_sig.name()}"
 
 
 def get_backend_index_for_aoti(
     func: NativeFunction,
     func_group_mapping: dict[OperatorName, NativeFunctionsGroup],
-    dispatch_key: DispatchKey,
+    dispatch_key: DispatchKey | None,
     backend_indices: dict[DispatchKey, BackendIndex],
     extend_aoti_c_shim: bool,
 ) -> BackendIndex | None:
     backend_index = None
+
+    if dispatch_key is None:
+        return backend_index
+
     if backend_indices[dispatch_key].has_kernel(func) or (
         func.structured_delegate is not None
         and func.structured_delegate in func_group_mapping
@@ -432,18 +475,19 @@ def get_backend_index_for_aoti(
 def get_header_for_aoti(
     func: NativeFunction,
     func_group_mapping: dict[OperatorName, NativeFunctionsGroup],
-    dispatch_key: DispatchKey,
+    dispatch_key: DispatchKey | None,
     backend_indices: dict[DispatchKey, BackendIndex],
     extend_aoti_c_shim: bool,
 ) -> str | None:
     backend_index = get_backend_index_for_aoti(
         func, func_group_mapping, dispatch_key, backend_indices, extend_aoti_c_shim
     )
-    return (
-        None
-        if backend_index is None
-        else f"#include <ATen/ops/{func.root_name}_{backend_index.dispatch_key.lower()}_dispatch.h>"
-    )
+    if backend_index is None:
+        if dispatch_key is None:
+            return f"#include <ATen/ops/{func.root_name}.h>"
+        return None
+
+    return f"#include <ATen/ops/{func.root_name}_{backend_index.dispatch_key.lower()}_dispatch.h>"
 
 
 def get_fallback_op_name(func: NativeFunction) -> str:
@@ -458,7 +502,7 @@ def gen_c_shim(
     func: NativeFunction,
     version_info: dict[str, list[str]],
     func_group_mapping: dict[OperatorName, NativeFunctionsGroup],
-    dispatch_key: DispatchKey,
+    dispatch_key: DispatchKey | None,
     backend_indices: dict[DispatchKey, BackendIndex],
     header: bool,
     extend_aoti_c_shim: bool,
@@ -466,11 +510,11 @@ def gen_c_shim(
     backend_index = get_backend_index_for_aoti(
         func, func_group_mapping, dispatch_key, backend_indices, extend_aoti_c_shim
     )
-    if backend_index is None:
+    if backend_index is None and dispatch_key is not None:
         return None
 
     schema = func.func
-    device = dispatch_key.lower()
+    device = "aten" if dispatch_key is None else dispatch_key.lower()
     backend_call = gen_static_dispatch_backend_call(
         func,
         backend_index,
@@ -496,7 +540,7 @@ def gen_c_shim(
 class ShimGenerator:
     inductor_fallback_ops: dict[str, dict[str, list[str]]]
     func_group_mapping: dict[OperatorName, NativeFunctionsGroup]
-    dispatch_key: DispatchKey
+    dispatch_key: DispatchKey | None
     backend_indices: dict[DispatchKey, BackendIndex]
     header: bool  # True to generate .h and False to generate .cpp
     extend_aoti_c_shim: bool
@@ -523,7 +567,7 @@ def gen_aoti_c_shim(
     native_functions: Sequence[NativeFunction],
     inductor_fallback_ops: dict[str, dict[str, list[str]]],
     func_group_mapping: dict[OperatorName, NativeFunctionsGroup],
-    dispatch_key: DispatchKey,
+    dispatch_key: DispatchKey | None,
     backend_indices: dict[DispatchKey, BackendIndex],
     header: bool,
     extend_aoti_c_shim: bool,
@@ -544,7 +588,19 @@ def gen_aoti_c_shim(
             )
         )
     )
-    device = dispatch_key.lower()
+    device = "aten" if dispatch_key is None else dispatch_key.lower()
+    include_device_functions = (
+        "#include <ATen/Functions.h>"
+        if dispatch_key is None
+        else f"#include <ATen/{str(dispatch_key)}Functions.h>"
+    )
+    aten_warning = (
+        (
+            "\n\n// This file corresponds to the aten_shimified_ops list in torchgen/aoti/fallback_ops.py\n"
+        )
+        if dispatch_key is None
+        else ""
+    )
     warning = """
 
 // WARNING: THIS FILE IS AUTOGENERATED BY torchgen. DO NOT MODIFY BY HAND.
@@ -553,6 +609,7 @@ def gen_aoti_c_shim(
     if header:
         return (
             warning
+            + aten_warning
             + textwrap.dedent("""
 
             #pragma once
@@ -575,13 +632,14 @@ def gen_aoti_c_shim(
     else:
         return (
             warning
+            + aten_warning
             + textwrap.dedent(f"""
 
             #include <torch/csrc/inductor/aoti_torch/generated/{"extend/" if extend_aoti_c_shim else ""}c_shim_{device}.h>
             #include <torch/csrc/inductor/aoti_torch/utils.h>
 
             #ifndef AT_PER_OPERATOR_HEADERS
-            #include <ATen/{str(dispatch_key)}Functions.h>
+            {include_device_functions}
             #include <ATen/CompositeExplicitAutogradFunctions.h>
             #include <ATen/CompositeExplicitAutogradNonFunctionalFunctions.h>
             #include <ATen/CompositeImplicitAutogradFunctions.h>
@@ -600,7 +658,7 @@ def gen_aoti_c_shim(
 
 def gen_aoti_c_shim_files(
     aoti_fm: FileManager,
-    aoti_backends: set[DispatchKey],
+    aoti_backends: set[DispatchKey | None],
     native_functions: Sequence[NativeFunction],
     backend_indices: dict[DispatchKey, BackendIndex],
     structured_native_functions: Sequence[NativeFunctionsGroup],
@@ -616,20 +674,27 @@ def gen_aoti_c_shim_files(
                 break
 
     for dispatch_key in aoti_backends:
+        # Use aten_shimified_ops for the aten backend, inductor_fallback_ops for others
+        fallback_ops_dict = (
+            aten_shimified_ops if dispatch_key is None else inductor_fallback_ops
+        )
         fallbacks = {}
         for func in native_functions:
             op_name = get_fallback_op_name(func)
-            if op_name in inductor_fallback_ops:
+            if op_name in fallback_ops_dict:
                 fallbacks[op_name] = func
         fallback_native_functions = tuple(
             value for _, value in sorted(fallbacks.items())
         )
 
-        # header files were checked in for ABI-compatiblilty checking
-        header_file_name = f"c_shim_{dispatch_key.lower()}.h"
+        # Use "aten" as the device name when dispatch_key is Generic
+        device_name = "aten" if dispatch_key is None else dispatch_key.lower()
+
+        # header files were checked in for ABI-compatibility checking
+        header_file_name = f"c_shim_{device_name}.h"
         new_header = gen_aoti_c_shim(
             fallback_native_functions,
-            inductor_fallback_ops,
+            fallback_ops_dict,
             structured_func_group_dict,
             dispatch_key,
             backend_indices,
@@ -648,9 +713,20 @@ def gen_aoti_c_shim_files(
                     os.path.join(aoti_fm.install_dir, header_file_name)
                 ) as old_file:
                     old_header = old_file.read()
-                    assert old_header == new_header, """
 
-WARNING: The generated AOTInductor C shim header files have unexpectedly changed. This
+                    if old_header != new_header:
+                        diff = "\n".join(
+                            difflib.unified_diff(
+                                old_header.splitlines(),
+                                new_header.splitlines(),
+                                fromfile="expected",
+                                tofile="actual",
+                                lineterm="",
+                            )
+                        )
+
+                        raise RuntimeError(f"""
+The generated AOTInductor C shim header files have unexpectedly changed. This
 indicates an AOTInductor fallback operator ABI backward compatibility breakage!!!
 Only in a limited number of situations, this is allowed:
 
@@ -664,7 +740,8 @@ torchgen/aoti/fallback_ops.py, and then run `python torchgen/gen.py --update-aot
 update the C shim header files by creating different versions of the fallback op. See
 https://github.com/pytorch/pytorch/pull/154848 as an example.
 
-                    """
+{diff}
+                    """)
             except FileNotFoundError:
                 print(
                     f"{os.path.join(aoti_fm.install_dir, header_file_name)} not found"
@@ -685,13 +762,17 @@ https://github.com/pytorch/pytorch/pull/154848 as an example.
                     headers.append(header)
             return "\n".join(sorted(set(headers)))
 
-        extra_headers = extra_cuda_headers if is_cuda_dispatch_key(dispatch_key) else ""
+        extra_headers = (
+            extra_cuda_headers
+            if dispatch_key is not None and is_cuda_dispatch_key(dispatch_key)
+            else ""
+        )
 
         aoti_fm.write(
-            f"c_shim_{dispatch_key.lower()}.cpp",
+            f"c_shim_{device_name}.cpp",
             lambda: gen_aoti_c_shim(
                 fallback_native_functions,
-                inductor_fallback_ops,
+                fallback_ops_dict,
                 structured_func_group_dict,
                 dispatch_key,
                 backend_indices,

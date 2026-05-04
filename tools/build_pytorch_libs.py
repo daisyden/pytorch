@@ -2,26 +2,23 @@ from __future__ import annotations
 
 import os
 import platform
+import subprocess
 
-from .optional_submodules import checkout_nccl
 from .setup_helpers.cmake import CMake, USE_NINJA
-from .setup_helpers.env import (
-    check_env_flag,
-    check_negative_env_flag,
-    IS_64BIT,
-    IS_WINDOWS,
-)
+from .setup_helpers.env import check_negative_env_flag, IS_64BIT, IS_WINDOWS
 
 
 def _get_vc_env(vc_arch: str) -> dict[str, str]:
     try:
-        from setuptools import distutils  # type: ignore[import]
+        from setuptools import distutils  # type: ignore[import,attr-defined]
 
         return distutils._msvccompiler._get_vc_env(vc_arch)  # type: ignore[no-any-return]
     except AttributeError:
-        from setuptools._distutils import _msvccompiler  # type: ignore[import]
+        from setuptools._distutils import (
+            _msvccompiler,  # type: ignore[import,attr-defined]
+        )
 
-        return _msvccompiler._get_vc_env(vc_arch)  # type: ignore[no-any-return]
+        return _msvccompiler._get_vc_env(vc_arch)  # type: ignore[no-any-return,attr-defined]
 
 
 def _overlay_windows_vcvars(env: dict[str, str]) -> dict[str, str]:
@@ -84,16 +81,26 @@ def build_pytorch(
     cmake: CMake,
 ) -> None:
     my_env = _create_build_env()
-    if (
-        not check_negative_env_flag("USE_CUDA")
-        and not check_negative_env_flag("USE_NCCL")
-        and not check_env_flag("USE_SYSTEM_NCCL")
-    ):
-        checkout_nccl()
     build_test = not check_negative_env_flag("BUILD_TEST")
     cmake.generate(
         version, cmake_python_library, build_python, build_test, my_env, rerun_cmake
     )
     if cmake_only:
         return
+    build_custom_step = os.getenv("BUILD_CUSTOM_STEP")
+    if build_custom_step:
+        try:
+            output = subprocess.check_output(
+                build_custom_step,
+                shell=True,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            print("Command output:")
+            print(output)
+        except subprocess.CalledProcessError as e:
+            print("Command failed with return code:", e.returncode)
+            print("Output (stdout and stderr):")
+            print(e.output)
+            raise
     cmake.build(my_env)

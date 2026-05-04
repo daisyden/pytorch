@@ -63,6 +63,7 @@ ALLOW_LIST = [
     ("prim::ModuleDictIndex", datetime.date(9999, 1, 1)),
     ("prim::MKLDNNRelu6", datetime.date(9999, 1, 1)),
     ("prim::MKLDNNRelu6_", datetime.date(9999, 1, 1)),
+    ("onednn::qconv2d_pointwise", datetime.date(2026, 5, 1)),
     ("prim::is_ort", datetime.date(9999, 1, 1)),
     ("prim::Concat", datetime.date(9999, 1, 1)),
     ("aten::_NestedTensor_GeneralizedBMM", datetime.date(9999, 1, 1)),
@@ -139,6 +140,8 @@ ALLOW_LIST = [
     # These ops are defined in torch/csrc/distributed/c10d/Ops.cpp
     # TODO: add back restriction when c10d ops can be exported
     ("c10d::.*", datetime.date(9999, 1, 1)),
+    # Previously MPS_only did not support backward
+    ("aten::_fused_rms_norm", datetime.date(2025, 12, 30)),
 ]
 
 ALLOW_LIST_COMPILED = [
@@ -247,7 +250,7 @@ def is_core_aten_op(schema) -> bool:
         #
         # If the core ATen op has been removed, we cannot be sure whether it
         # was previously a core ATen op or not via checking tags this way.
-        # Conservatively assume that you are ARE a core ATen op in this case.
+        # Conservatively assume that you ARE a core ATen op in this case.
         # This means that deleting a core ATen op will still be caught.
         # But if you're deleting an operator that is not a core ATen op
         # and add it to the allow_list, you would need to additionally specify
@@ -299,7 +302,7 @@ def check_bc(existing_schemas):
             log.warning(
                 "Can NOT find backward compatible schemas after changes "
                 "for schema %s from the following candidates:\n[\n%s\n]",
-                str(existing_schema),
+                existing_schema,
                 "\n\t".join(str(s) for s in matching_new_schemas),
             )
             # TODO Print out more details about why candidates don't match.
@@ -344,12 +347,11 @@ def check_fc(existing_schemas):
             log.warning(
                 "Can NOT find forward compatible schemas after changes "
                 "for schema %s from the following candidates:\n[\n\t%s\n]",
-                str(existing_schema),
+                existing_schema,
                 "\n\t".join(str(s) for s in matching_new_schemas),
             )
             log.warning(
-                "Refer to following reasons for failure "
-                "to find FC schema:\n[\n%s\n]",
+                "Refer to following reasons for failure to find FC schema:\n[\n%s\n]",
                 "\n\t".join(str(r) for r in possible_failure_reasons),
             )
             broken_ops.append(str(existing_schema))

@@ -34,7 +34,9 @@ class Vectorized<c10::complex<double>> {
   static constexpr size_type size() {
     return 4;
   }
-  Vectorized() {}
+  Vectorized() {
+    values = _mm512_setzero_pd();
+  }
   Vectorized(__m512d v) : values(v) {}
   Vectorized(c10::complex<double> val) {
     double real_value = val.real();
@@ -178,7 +180,7 @@ class Vectorized<c10::complex<double>> {
     std::memcpy(
         tmp_values,
         reinterpret_cast<const double*>(ptr),
-        count * sizeof(c10::complex<double>));
+        std::min<int64_t>(count, size()) * sizeof(c10::complex<double>));
     return _mm512_load_pd(tmp_values);
   }
   void store(void* ptr, int count = size()) const {
@@ -187,7 +189,10 @@ class Vectorized<c10::complex<double>> {
     } else if (count > 0) {
       double tmp_values[2 * size()];
       _mm512_storeu_pd(reinterpret_cast<double*>(tmp_values), values);
-      std::memcpy(ptr, tmp_values, count * sizeof(c10::complex<double>));
+      std::memcpy(
+          ptr,
+          tmp_values,
+          std::min<int64_t>(count, size()) * sizeof(c10::complex<double>));
     }
   }
   const c10::complex<double>& operator[](int idx) const = delete;
