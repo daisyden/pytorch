@@ -28,7 +28,7 @@ CUDA_ARCHES = ["12.6", "13.0", "13.2"]
 CUDA_STABLE = "13.0"
 CUDA_ARCHES_FULL_VERSION = {
     "12.6": "12.6.3",
-    "13.0": "13.0.2",
+    "13.0": "13.0.3",
     "13.2": "13.2.1",
 }
 CUDA_ARCHES_CUDNN_VERSION = {
@@ -51,10 +51,6 @@ CUDA_AARCH64_ARCHES = [
     "13.2-aarch64",
 ]
 
-
-# WARNING: For CUDA 13.0, cublas is pinned to a version range rather
-# than an exact version. A broken cublas release within that range will be
-# silently pulled in.
 PYTORCH_EXTRA_INSTALL_REQUIREMENTS = {
     "12.6": (
         "cuda-toolkit[nvrtc,cudart,cupti,cufft,curand,cusolver,cusparse,cublas,cufile,nvjitlink,nvtx]==12.6.3; platform_system == 'Linux' | "
@@ -65,8 +61,7 @@ PYTORCH_EXTRA_INSTALL_REQUIREMENTS = {
         "nvidia-nvshmem-cu12==3.4.5; platform_system == 'Linux'"
     ),
     "13.0": (
-        "cuda-toolkit[nvrtc,cudart,cupti,cufft,curand,cusolver,cusparse,cufile,nvjitlink,nvtx]==13.0.2; platform_system == 'Linux' | "
-        "nvidia-cublas>=13.1.0.3,<=13.1.1.3; platform_system == 'Linux' | "
+        "cuda-toolkit[nvrtc,cudart,cupti,cufft,curand,cusolver,cusparse,cublas,cufile,nvjitlink,nvtx]==13.0.3; platform_system == 'Linux' | "
         "cuda-bindings>=13.0.3,<14; platform_system == 'Linux' and python_version < '3.15' | "
         "nvidia-cudnn-cu13==9.20.0.48; platform_system == 'Linux' | "
         "nvidia-cusparselt-cu13==0.8.1; platform_system == 'Linux' | "
@@ -102,7 +97,8 @@ PYTORCH_EXTRA_INSTALL_REQUIREMENTS = {
         "tbb==2023.0.0 | "
         "tcmlib==1.5.0 | "
         "umf==1.1.0 | "
-        "intel-pti==0.17.0"
+        "intel-pti==0.17.0 | "
+        "pyzes==0.1.1; platform_system == 'Linux' and platform_machine == 'x86_64'"
     ),
 }
 
@@ -303,6 +299,24 @@ WHEEL_CONTAINER_IMAGES = {
     "cpu-s390x": "manylinuxs390x-builder:cpu-s390x",
 }
 
+# RELEASE-ONLY: pin the manywheel builder images to a fixed build so the release
+# uses a reproducible toolchain instead of main's floating tags. The suffix is
+# the .ci/docker tree hash (`git rev-parse HEAD:.ci/docker`), i.e. the same tag
+# .github/actions/binary-docker-build publishes. Only linux manywheel builds run
+# inside these containers, so only those images are pinned. s390x is excluded:
+# its builder images are built locally on self-hosted runners and never published
+# to docker.io under the pinned tag, so pinning it breaks the image pull.
+DOCKER_IMAGE_PIN = "f38ba0b10220982e39441d29d203d803a2b56c92"
+MANYWHEEL_OSES = ("linux", "linux-aarch64")
+
+
+def wheel_container_image_tag_prefix(arch_version: str, os: str) -> str:
+    tag_prefix = WHEEL_CONTAINER_IMAGES[arch_version].split(":")[1]
+    if os in MANYWHEEL_OSES:
+        return f"{tag_prefix}-{DOCKER_IMAGE_PIN}"
+    return tag_prefix
+
+
 RELEASE = "release"
 DEBUG = "debug"
 
@@ -435,14 +449,6 @@ def generate_wheels_matrix(
             ):
                 continue
 
-            # TODO: Re-enable XPU for python 3.15 once the triton XPU 3.15
-            # wheel build is fixed (tracked in #184901). Triton XPU is
-            # currently skipped for 3.15/3.15t in build-triton-wheel.yml.
-            if arch_version in XPU_ARCHES and (
-                python_version == "3.15" or python_version == "3.15t"
-            ):
-                continue
-
             # cuda linux wheels require PYTORCH_EXTRA_INSTALL_REQUIREMENTS to install
 
             if (
@@ -460,9 +466,9 @@ def generate_wheels_matrix(
                         "container_image": WHEEL_CONTAINER_IMAGES[arch_version].split(
                             ":"
                         )[0],
-                        "container_image_tag_prefix": WHEEL_CONTAINER_IMAGES[
-                            arch_version
-                        ].split(":")[1],
+                        "container_image_tag_prefix": wheel_container_image_tag_prefix(
+                            arch_version, os
+                        ),
                         "package_type": package_type,
                         "pytorch_extra_install_requirements": (
                             PYTORCH_EXTRA_INSTALL_REQUIREMENTS[
@@ -491,9 +497,9 @@ def generate_wheels_matrix(
                         "container_image": WHEEL_CONTAINER_IMAGES[arch_version].split(
                             ":"
                         )[0],
-                        "container_image_tag_prefix": WHEEL_CONTAINER_IMAGES[
-                            arch_version
-                        ].split(":")[1],
+                        "container_image_tag_prefix": wheel_container_image_tag_prefix(
+                            arch_version, os
+                        ),
                         "package_type": package_type,
                         "build_name": f"{package_type}-py{python_version}-{gpu_arch_type}{gpu_arch_version}".replace(
                             ".", "_"

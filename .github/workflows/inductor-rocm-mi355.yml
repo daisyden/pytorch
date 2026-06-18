@@ -1,12 +1,15 @@
+# Unneeded for CI: trunk.yml covers the same ROCm testing.
+# Kept in-repo for metrics; auto-triggers below are commented out.
+# workflow_dispatch remains for manual runs.
 name: inductor-rocm-mi355
 
 on:
-  push:
-    branches:
-      - main
-      - release/*
-    tags:
-      - ciflow/inductor-rocm-mi355/*
+  #push:
+  #  branches:
+  #    - main
+  #    - release/*
+  #  tags:
+  #    - ciflow/inductor-rocm-mi355/*
   workflow_dispatch:
 
 concurrency:
@@ -26,7 +29,7 @@ jobs:
 
   get-label-type:
     name: get-label-type
-    uses: pytorch/pytorch/.github/workflows/_runner-determinator.yml@main
+    uses: pytorch/pytorch/.github/workflows/_runner-determinator.yml@release/2.13
     if: ${{ (github.event_name != 'schedule' || github.repository == 'pytorch/pytorch') && github.repository_owner == 'pytorch' }}
     with:
       triggering_actor: ${{ github.triggering_actor }}

@@ -197,8 +197,11 @@ def fork_rng(
         yield
         return
 
-    device_type = torch.device(device_type).type
-    device_mod = getattr(torch, device_type, None)
+    acc = torch.accelerator.current_accelerator()
+    # Default to cuda instead of CPU since CPU rng is always forked
+    device_type = device_type or (acc.type if acc is not None else "cuda")
+
+    device_mod = torch.get_device_module(device_type)
     if device_mod is None:
         raise RuntimeError(
             f"torch has no module of `{device_type}`, you should register "

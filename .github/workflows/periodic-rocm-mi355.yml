@@ -1,14 +1,17 @@
+# Unneeded for CI: trunk.yml covers the same ROCm testing.
+# Kept in-repo for metrics; auto-triggers below are commented out.
+# workflow_dispatch remains for manual runs.
 name: periodic-rocm-mi355
 
 on:
-  schedule:
-    - cron: 0 0,3,6,9,12,15,18,21 * * *
-    - cron: 29 8 * * *  # about 1:29am PDT, for mem leak check and rerun disabled tests
-  push:
-    tags:
-      - ciflow/periodic-rocm-mi355/*
-    branches:
-      - release/*
+  #schedule:
+  #  - cron: 0 0,3,6,9,12,15,18,21 * * *
+  #  - cron: 29 8 * * *  # about 1:29am PDT, for mem leak check and rerun disabled tests
+  #push:
+  #  tags:
+  #    - ciflow/periodic-rocm-mi355/*
+  #  branches:
+  #    - release/*
   workflow_dispatch:
 
 concurrency:
@@ -33,7 +36,7 @@ jobs:
 
   get-label-type:
     name: get-label-type
-    uses: pytorch/pytorch/.github/workflows/_runner-determinator.yml@main
+    uses: pytorch/pytorch/.github/workflows/_runner-determinator.yml@release/2.13
     if: (github.event_name != 'schedule' || github.repository == 'pytorch/pytorch') && github.repository_owner == 'pytorch'
     with:
       triggering_actor: ${{ github.triggering_actor }}
