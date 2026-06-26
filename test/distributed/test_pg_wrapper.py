@@ -396,7 +396,10 @@ if not TEST_WITH_DEV_DBG_ASAN:
 
         @skip_if_lt_x_gpu(2)
         @with_dist_debug_levels(levels=["DETAIL"])
-        @patch("torch.distributed.distributed_c10d._GLOO_AVAILABLE", False)
+        @patch(
+            "torch.distributed.distributed_c10d.is_gloo_available",
+            lambda: False,
+        )
         def test_debug_level_detail_no_gloo(self):
             with self.assertRaisesRegex(
                 AssertionError, "ProcessGroupWrapper unsupported without GLOO backend"
@@ -446,7 +449,10 @@ if not TEST_WITH_DEV_DBG_ASAN:
 
         @requires_accelerator_dist_backend(["nccl", "xccl"])
         @skip_if_lt_x_gpu(2)
-        @patch("torch.distributed.distributed_c10d._GLOO_AVAILABLE", False)
+        @patch(
+            "torch.distributed.distributed_c10d.is_gloo_available",
+            lambda: False,
+        )
         def test_new_group_no_gloo(self):
             def patched_isinstance(obj, clazz):
                 if clazz is _ProcessGroupWrapper:
@@ -461,7 +467,7 @@ if not TEST_WITH_DEV_DBG_ASAN:
                 self._create_wrapper_pg(with_new_group=True)
                 # nothing to assert, isinstance(pg, _ProcessGroupWrapper)
                 # should never be invoked since it is proceeded by
-                # _GLOO_AVAILABLE check, this test will fail on
+                # Gloo availability check, this test will fail on
                 # an unexpected NameError if not.
 
 

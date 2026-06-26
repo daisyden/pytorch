@@ -6,7 +6,10 @@ from itertools import product
 import torch
 from torch.distributed._shard import _shard_tensor, sharded_tensor
 from torch.distributed._shard.sharding_spec import EnumerableShardingSpec, ShardMetadata
-from torch.testing._internal.common_distributed import requires_accelerator_dist_backend, skip_if_lt_x_gpu
+from torch.testing._internal.common_distributed import (
+    requires_accelerator_dist_backend,
+    skip_if_lt_x_gpu,
+)
 from torch.testing._internal.common_utils import run_tests, TEST_WITH_DEV_DBG_ASAN
 from torch.testing._internal.distributed._shard.sharded_tensor import (
     ShardedTensorTestBase,
@@ -17,9 +20,10 @@ from torch.testing._internal.distributed._shard.sharded_tensor._test_st_common i
 )
 
 
-DEVICE_TYPE = torch.accelerator.current_accelerator().type
+DEVICE_TYPE = (
+    acc.type if (acc := torch.accelerator.current_accelerator(True)) else "cpu"
+)
 BACKEND = torch.distributed.get_default_backend_for_device(DEVICE_TYPE)
-
 
 if TEST_WITH_DEV_DBG_ASAN:
     print(
@@ -32,7 +36,7 @@ if TEST_WITH_DEV_DBG_ASAN:
 class TestReshard(ShardedTensorTestBase):
     def _run_sharded_tensor_reshard(self, sharding_spec, reshard_spec, input_size):
         torch.manual_seed(0)
-        local_tensor = torch.rand(*input_size).to(torch.device(self.rank))
+        local_tensor = torch.rand(*input_size).to(self.rank)
         st = _shard_tensor(local_tensor, sharding_spec)
         st_compare = _shard_tensor(local_tensor, reshard_spec)
         st.reshard(reshard_spec)
