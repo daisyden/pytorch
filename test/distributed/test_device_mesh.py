@@ -794,14 +794,14 @@ class InitDeviceMeshTest(DTensorTestBase):
 class TestDeviceMeshGetItem(DTensorTestBase):
     @property
     def world_size(self):
-        return min(8, DEVICE_COUNT)
+        return 8
 
     @with_comms
     def test_raises_no_mesh_dim_found(self):
         with self.assertRaisesRegex(
             RuntimeError, "Cannot slice a DeviceMesh without mesh_dim_names!"
         ):
-            mesh = init_device_mesh(self.device_type, (2, self.world_size // 2))
+            mesh = init_device_mesh(self.device_type, (2, 4))
             mesh["DP"]
 
     @with_comms
@@ -811,14 +811,14 @@ class TestDeviceMeshGetItem(DTensorTestBase):
             mesh_dim_names = ("DP", "TP")
             mesh = init_device_mesh(
                 self.device_type,
-                (2, self.world_size // 2),
+                (2, 4),
                 mesh_dim_names=mesh_dim_names,
             )
             mesh[child_mesh_dim_name]
 
     @with_comms
     def test_get_item_2d(self):
-        mesh_shape = (2, self.world_size // 2)
+        mesh_shape = (2, 4)
         mesh_dim_names = ("DP", "TP")
         mesh_2d = init_device_mesh(
             self.device_type, mesh_shape, mesh_dim_names=mesh_dim_names
@@ -832,15 +832,15 @@ class TestDeviceMeshGetItem(DTensorTestBase):
             ).reshape(-1, mesh_2d.mesh.size(mesh_dim))
 
         tp_mesh = mesh_2d["TP"]
-        tp_group_idx = self.rank // (self.world_size // 2)
+        tp_group_idx = self.rank // 4
         self.assertEqual(tp_mesh.mesh, pg_ranks_by_dim_name["TP"][tp_group_idx])
 
-        dp_group_idx = self.rank % (self.world_size // 2)
+        dp_group_idx = self.rank % 4
         self.assertEqual(mesh_2d["DP"].mesh, pg_ranks_by_dim_name["DP"][dp_group_idx])
 
     @with_comms
     def test_get_item_1d(self):
-        mesh = init_device_mesh(self.device_type, (self.world_size,), mesh_dim_names=("dp",))
+        mesh = init_device_mesh(self.device_type, (8,), mesh_dim_names=("dp",))
         # Make sure slicing out 1D mesh from a 1D mesh works.
         dp_mesh = mesh["dp"]
         self.assertEqual(dp_mesh, mesh)
@@ -849,7 +849,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
             dp_mesh = mesh["dim0"]
 
     @with_comms
-    @skip_if_lt_x_gpu(8)
     def test_get_item_3d(self):
         mesh_shape = (2, 2, 2)
         mesh_dim_names = ("Replicate", "Shard", "TP")
@@ -891,7 +890,7 @@ class TestDeviceMeshGetItem(DTensorTestBase):
 
     @with_comms
     def test_cache_and_reuse_submesh_slice_result(self):
-        mesh = init_device_mesh(self.device_type, (2, self.world_size // 2), mesh_dim_names=("dp", "tp"))
+        mesh = init_device_mesh(self.device_type, (2, 4), mesh_dim_names=("dp", "tp"))
 
         ref_pg_count = _world.group_count
 
@@ -905,7 +904,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
         self.assertEqual(_world.group_count, ref_pg_count)
 
     @with_comms
-    @skip_if_lt_x_gpu(8)
     def test_get_item_3d_noncontiguous_slicing(self):
         mesh_shape = (2, 2, 2)
         mesh_dim_names = ("dp", "pp", "cp")
@@ -946,7 +944,7 @@ class TestDeviceMeshGetItem(DTensorTestBase):
     @with_comms
     @skip_if_lt_x_gpu(4)
     def test_flatten_mesh_3d(self):
-        mesh_shape = (2, 2, self.world_size // 4)
+        mesh_shape = (2, 2, 2)
         mesh_dim_names = ("dp", "cp", "tp")
         mesh_3d = init_device_mesh(
             self.device_type, mesh_shape, mesh_dim_names=mesh_dim_names
@@ -1019,7 +1017,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
             mesh_3d["cp", "tp"]._flatten("dp_tp")
 
     @with_comms(eager_init=True)
-    @skip_if_lt_x_gpu(8)
     def test_flatten_mesh_4d(self):
         mesh_shape = (2, 2, 2, 1)
         mesh_dim_names = ("dp_replicate", "dp_shard", "cp", "tp")
@@ -1049,7 +1046,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
         self.assertEqual(mesh_4d["dp_replicate", "dp_cp", "tp"].mesh.shape, (1, 1, 1))
 
     @with_comms
-    @skip_if_lt_x_gpu(8)
     def test_unflatten_mesh_2d(self):
         mesh_shape = (4, 2)
         mesh_dim_names = ("dp", "tp")
@@ -1068,7 +1064,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
             self.assertEqual(mesh_2d["dp_shard"].mesh, unflatten_mesh["dp_shard"].mesh)
 
     @with_comms
-    @skip_if_lt_x_gpu(8)
     def test_unflatten_mesh_3d(self):
         # Test unflatten from a dummy world mesh, which is the case we need for Expert Parallelism(EP).
         global_mesh = init_device_mesh(
@@ -1130,7 +1125,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
         w.wait()
 
     @with_comms
-    @skip_if_lt_x_gpu(8)
     def test_concatenate_2d(self):
         mesh_shape = (2, 4)
         mesh_dim_names = ("dp", "tp")
@@ -1143,7 +1137,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
         self.assertEqual(concatenated_mesh.get_group("tp"), mesh_2d.get_group("tp"))
 
     @with_comms
-    @skip_if_lt_x_gpu(8)
     def test_concatenate_3d(self):
         mesh_shape = (2, 2, 2)
         mesh_dim_names = ("pp", "dp", "tp")
@@ -1160,7 +1153,6 @@ class TestDeviceMeshGetItem(DTensorTestBase):
         )
 
     @with_comms
-    @skip_if_lt_x_gpu(8)
     def test_reconstruct_mesh_with_flatten_dim(self):
         mesh_3d = init_device_mesh(
             self.device_type, (2, 2, 2), mesh_dim_names=("replicate", "shard", "cp")
