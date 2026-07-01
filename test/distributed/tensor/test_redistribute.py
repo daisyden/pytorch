@@ -1122,6 +1122,7 @@ class MultiDimRedistributeTest(DTensorContinuousTestBase):
     device_count = torch.accelerator.device_count() if torch.accelerator.is_available() else 8
     world_size = min(8, device_count)
 
+    @skip_if_lt_x_gpu(4)
     def test_multi_dim_mesh(self):
         devices = torch.arange(self.world_size)
         for mesh_shape in [devices, devices.view(4, self.world_size // 4), devices.view(2, 2, self.world_size // 4)]:
@@ -1222,6 +1223,7 @@ class DistributeWithDeviceOrderTest(DTensorContinuousTestBase):
         else:
             return ""
 
+    @skip_if_lt_x_gpu(4)
     def test_ordered_redistribute(self):
         """Test ordered redistribution with various sharding syntaxes"""
         torch.manual_seed(21)
@@ -1376,7 +1378,8 @@ class DistributeWithDeviceOrderTest(DTensorContinuousTestBase):
             # Clear the transformation cache between iterations. Without this,
             # the second iteration would use cached paths from the first
             _gen_transform_infos.cache_clear()
-
+    
+    @skip_if_lt_x_gpu(4)
     def test_generate_shard_orders(self):
         """Check if `generate_shard_orders` generates unique sharding combinations"""
         import math
@@ -1416,6 +1419,7 @@ class DistributeWithDeviceOrderTest(DTensorContinuousTestBase):
             expected_total_combination *= math.factorial(N)
             self.assertEqual(len(all_combinations), expected_total_combination)
 
+    @skip_if_lt_x_gpu(4)
     @unittest.skipIf(TEST_WITH_ROCM, "https://github.com/pytorch/pytorch/issues/168197")
     def test_ordered_distribute_all_combination(self):
         """Exhaustively test all possible sharding combinations and verify correctness"""
