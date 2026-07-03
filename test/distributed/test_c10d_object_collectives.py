@@ -62,7 +62,7 @@ class TestObjectCollectives(DistributedTestBase):
         dist.all_gather_object(object_list=output, obj=self.rank)
 
         for i, v in enumerate(output):
-            self.assertEqual(i, v, f"rank: {self.rank}")
+            self.assertEqual(i, v, lambda msg: f"{msg}\nrank: {self.rank}")
 
     @with_comms()
     def test_gather_object(self):
@@ -71,7 +71,7 @@ class TestObjectCollectives(DistributedTestBase):
 
         if self.rank == 0:
             for i, v in enumerate(output):
-                self.assertEqual(i, v, f"rank: {self.rank}")
+                self.assertEqual(i, v, lambda msg: f"{msg}\nrank: {self.rank}")
 
     @skipIfHpu
     @with_comms()
