@@ -1,6 +1,7 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/Dispatch.h>
 #include <ATen/native/ForeachUtils.h>
+#include <c10/cuda/CUDAMathCompat.h>
 #include <c10/util/TypeSafeSignMath.h>
 #include <ATen/native/cuda/ForeachFunctors.cuh>
 
@@ -12,6 +13,7 @@
 #include <ATen/ops/_foreach_asin_native.h>
 #include <ATen/ops/_foreach_atan_native.h>
 #include <ATen/ops/_foreach_ceil_native.h>
+#include <ATen/ops/_foreach_clone_native.h>
 #include <ATen/ops/_foreach_cos_native.h>
 #include <ATen/ops/_foreach_cosh_native.h>
 #include <ATen/ops/_foreach_erf_native.h>
@@ -28,6 +30,7 @@
 #include <ATen/ops/_foreach_neg_native.h>
 #include <ATen/ops/_foreach_reciprocal_native.h>
 #include <ATen/ops/_foreach_round_native.h>
+#include <ATen/ops/_foreach_rsqrt_native.h>
 #include <ATen/ops/_foreach_sigmoid_native.h>
 #include <ATen/ops/_foreach_sign_native.h>
 #include <ATen/ops/_foreach_sin_native.h>
@@ -38,7 +41,9 @@
 #include <ATen/ops/_foreach_trunc_native.h>
 #include <ATen/ops/_foreach_zero_native.h>
 
+#include <ATen/ops/_foreach_copy_native.h>
 #include <ATen/ops/empty_like_native.h>
+#include <ATen/ops/empty_strided_native.h>
 #endif
 
 namespace at::native {
@@ -65,7 +70,7 @@ std::vector<Tensor> foreach_unary_op(TensorList tensors) {
           /* res_arg_index */ 1>(),
       Op<opmath_t>());
 
-  return tensor_lists[1];
+  return std::move(tensor_lists[1]);
 }
 
 template <typename scalar_t, template <class> class Op>
@@ -237,7 +242,7 @@ void floating_half_bfloat16_(TensorList tensors) {
   OP_CUSTOM_FUNCTOR(function, op_name, functor_name);
 
 OP(floating_half_bfloat16, erfc, Erfc);
-OP(floating_half, lgamma, Lgamma);
+OP(floating_half_bfloat16, lgamma, Lgamma);
 OP(floating_half_bfloat16, trunc, Truncf);
 OP(floating_half_bfloat16, floor, Floor);
 OP(floating_half_bfloat16, ceil, Ceil);
@@ -304,11 +309,35 @@ struct Sign {
   }
 };
 
-OP_CUSTOM_FUNCTOR(floating_half_bfloat16, sigmoid, Sigmoid)
+template <typename T>
+struct Rsqrt {
+  C10_DEVICE T operator()(T t) const {
+    return c10::cuda::compat::rsqrt(t);
+  }
+};
+
+template <>
+struct Rsqrt<c10::complex<float>> {
+  C10_DEVICE c10::complex<float> operator()(c10::complex<float> t) const {
+    const auto one = c10::complex<float>(1.0, 0);
+    return one / std::sqrt(t);
+  }
+};
+
+template <>
+struct Rsqrt<c10::complex<double>> {
+  C10_DEVICE c10::complex<double> operator()(c10::complex<double> t) const {
+    const auto one = c10::complex<double>(1.0, 0);
+    return one / std::sqrt(t);
+  }
+};
+
+OP_CUSTOM_FUNCTOR(floating_complex_half_bfloat16, sigmoid, Sigmoid)
 OP_CUSTOM_FUNCTOR(floating_half_bfloat16, round, Round)
 OP_CUSTOM_FUNCTOR(floating_half_bfloat16, frac, Trunc)
 OP_CUSTOM_FUNCTOR(floating_complex_half_bfloat16, reciprocal, Reciprocal)
 OP_CUSTOM_FUNCTOR(floating_half_bfloat16, sign, Sign)
+OP_CUSTOM_FUNCTOR(floating_complex_half_bfloat16, rsqrt, Rsqrt)
 
 // note(mkozuki): tensor dtype checks of `neg` kernels.
 // Since `check_foreach_api_restrictions` don't require all the tensors to have
@@ -403,6 +432,50 @@ void foreach_tensor_zero_cuda_(TensorList tensors) {
                 /* r_args_depth */ 1,
                 /* res_arg_index */ 0>());
       });
+}
+
+std::vector<Tensor> foreach_tensor_clone_cuda(
+    TensorList self,
+    std::optional<MemoryFormat> memory_format) {
+  check_foreach_api_restrictions(self);
+  if (!_check_tensors_share_device_and_dtype({self})) {
+    return at::native::foreach_tensor_clone_slow(self, memory_format);
+  }
+
+  std::vector<Tensor> ret{};
+  ret.reserve(self.size());
+
+  auto realized_memory_format = memory_format.value_or(MemoryFormat::Preserve);
+  for (const auto& s : self) {
+    // This logic modified from at::native::clone.
+    if (realized_memory_format == MemoryFormat::Preserve) {
+      if (s.is_non_overlapping_and_dense()) {
+        // Copy all strides, this is marginally faster than calling empty_like
+        auto options = s.options();
+        ret.emplace_back(at::native::empty_strided_cuda(
+            s.sizes(),
+            s.strides(),
+            c10::optTypeMetaToScalarType(options.dtype_opt()),
+            options.layout_opt(),
+            options.device_opt(),
+            options.pinned_memory_opt()));
+      } else {
+        ret.emplace_back(at::native::empty_like(s));
+      }
+    } else {
+      auto options = s.options();
+      ret.emplace_back(at::native::empty_like(
+          s,
+          c10::optTypeMetaToScalarType(options.dtype_opt()),
+          options.layout_opt(),
+          options.device_opt(),
+          options.pinned_memory_opt(),
+          realized_memory_format));
+    }
+  }
+
+  at::native::foreach_tensor_copy_list_kernel_cuda_(ret, self);
+  return ret;
 }
 
 } // namespace at::native

@@ -102,7 +102,7 @@ static size_t getNewCapacity(size_t MinSize, size_t TSize, size_t OldCapacity) {
   // In theory 2*capacity can overflow if the capacity is 64 bit, but the
   // original capacity would never be large enough for this to be a problem.
   size_t NewCapacity = 2 * OldCapacity + 1; // Always grow.
-  return std::min(std::max(NewCapacity, MinSize), MaxSize);
+  return std::clamp(NewCapacity, MinSize, MaxSize);
 }
 
 // Note: Moving this function into the header may cause performance regression.
@@ -123,7 +123,7 @@ void* SmallVectorBase<Size_T>::mallocForGrow(
 // Note: Moving this function into the header may cause performance regression.
 template <class Size_T>
 void SmallVectorBase<Size_T>::grow_pod(
-    void* FirstEl,
+    const void* FirstEl,
     size_t MinSize,
     size_t TSize) {
   size_t NewCapacity = getNewCapacity<Size_T>(MinSize, TSize, this->capacity());

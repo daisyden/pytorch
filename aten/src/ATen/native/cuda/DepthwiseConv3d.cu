@@ -85,7 +85,7 @@ __global__ void conv_depthwise3d_cuda_kernel(
       }
       input_ptr += iW * (iH * dilationT - kH * dilationH);
     }
-    if (bias != NULL) {
+    if (bias != nullptr) {
       sum += bias[out_channel];
     }
 
@@ -390,7 +390,7 @@ void conv_depthwise_shape_check(
 Tensor conv_depthwise3d_cuda(
     const Tensor& input,
     const Tensor& weight,
-    IntArrayRef kernel_size, const c10::optional<Tensor>& bias_opt,
+    IntArrayRef kernel_size, const std::optional<Tensor>& bias_opt,
     IntArrayRef stride,
     IntArrayRef padding,
     IntArrayRef dilation) {
@@ -435,7 +435,7 @@ Tensor conv_depthwise3d_cuda(
         int64_t smem = 0;
 
         const scalar_t* bias_ptr =
-            bias_.defined() ? bias_.const_data_ptr<scalar_t>() : NULL;
+            bias_.defined() ? bias_.const_data_ptr<scalar_t>() : nullptr;
 
         // Range check to avoid overflow in CUDA kernels.
         TORCH_CHECK(input_.numel() <= std::numeric_limits<int32_t>::max(),
@@ -695,7 +695,7 @@ std::tuple<Tensor, Tensor, Tensor> conv_depthwise3d_backward_cuda(
 
 }
 
-REGISTER_CUDA_DISPATCH(conv_depthwise3d_backward_stub, &conv_depthwise3d_backward_cuda);
+REGISTER_CUDA_DISPATCH(conv_depthwise3d_backward_stub, &conv_depthwise3d_backward_cuda)
 
 #undef DWCONV3D_BACKWARD_INPUT_DISPATCH_SPECIALIZATION
 #undef DWCONV3D_BACKWARD_INPUT_DISPATCH_OTHERS

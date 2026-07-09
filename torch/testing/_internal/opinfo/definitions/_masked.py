@@ -3,7 +3,6 @@
 import unittest
 from collections.abc import Sequence
 from functools import partial
-from typing import List
 
 import numpy as np
 
@@ -53,7 +52,15 @@ def sample_inputs_softmax_variant(
         ((S, M, S), (2,)),
         *([((S, 0, 0), (-1,))] if use_zero_dimensions else []),
     ]
-    kwargs = dict(dtype=torch.float64) if with_dtype else None
+    kwargs = (
+        dict(
+            dtype=(
+                torch.bfloat16 if torch.device(device).type == "mps" else torch.float64
+            )
+        )
+        if with_dtype
+        else None
+    )
 
     # PyTorch on XLA throws an error when passed with dim argument for 0d tensor.
     # See https://github.com/pytorch/xla/issues/3061 for more details.
@@ -103,8 +110,9 @@ def sample_inputs_masked_reduction(op_info, device, dtype, requires_grad, **kwar
         for mask in _generate_masked_op_mask(
             sample_input.input.shape, device, **kwargs
         ):
-            sample_input_args, sample_input_kwargs = sample_input.args, dict(
-                mask=mask, **sample_input.kwargs
+            sample_input_args, sample_input_kwargs = (
+                sample_input.args,
+                dict(mask=mask, **sample_input.kwargs),
             )
             yield SampleInput(
                 sample_input.input.detach().requires_grad_(requires_grad),
@@ -225,8 +233,9 @@ def sample_inputs_masked_norm(op_info, device, dtype, requires_grad, **kwargs):
             op_info, device, dtype, requires_grad, **kwargs
         ):
             sample_input_args, sample_input_kwargs = (
-                ord,
-            ) + sample_input.args, sample_input.kwargs.copy()
+                (ord,) + sample_input.args,
+                sample_input.kwargs.copy(),
+            )
             yield SampleInput(
                 sample_input.input.clone().requires_grad_(requires_grad),
                 args=sample_input_args,
@@ -277,8 +286,9 @@ def sample_inputs_masked_std_var(op_info, device, dtype, requires_grad, **kwargs
             for mask in _generate_masked_op_mask(
                 sample_input.input.shape, device, **kwargs
             ):
-                sample_input_args, sample_input_kwargs = sample_input.args, dict(
-                    mask=mask, **sample_input.kwargs
+                sample_input_args, sample_input_kwargs = (
+                    sample_input.args,
+                    dict(mask=mask, **sample_input.kwargs),
                 )
                 yield SampleInput(
                     sample_input.input.detach().requires_grad_(requires_grad),
@@ -357,17 +367,17 @@ def sample_inputs_masked_softmax(
 
 def sample_inputs_masked_cumops(op_info, device, dtype, requires_grad, **kwargs):
     """Sample inputs for masked cumsum and cumprod."""
-    inputs: List[SampleInput] = []
     for sample_input in sample_inputs_softmax_variant(
         op_info, device, dtype, requires_grad, **kwargs
     ):
         for mask in _generate_masked_op_mask(
             sample_input.input.shape, device, **kwargs
         ):
-            if type(mask) != torch.Tensor:
+            if type(mask) is not torch.Tensor:
                 continue
-            sample_input_args, sample_input_kwargs = sample_input.args, dict(
-                mask=mask, **sample_input.kwargs
+            sample_input_args, sample_input_kwargs = (
+                sample_input.args,
+                dict(mask=mask, **sample_input.kwargs),
             )
             if "keepdim" in sample_input_kwargs:
                 sample_input_kwargs.pop("keepdim")
@@ -400,9 +410,9 @@ def sample_inputs_masked_logaddexp(op_info, device, dtype, requires_grad, **kwar
         make_tensor, dtype=dtype, device=device, requires_grad=requires_grad
     )
     for shape, input_masks, other_masks in zip(
-        shapes, input_mask_lists, other_mask_lists
+        shapes, input_mask_lists, other_mask_lists, strict=True
     ):
-        for input_mask, other_mask in zip(input_masks, other_masks):
+        for input_mask, other_mask in zip(input_masks, other_masks, strict=True):
             yield SampleInput(
                 make_arg(shape),
                 make_arg(shape),
@@ -425,7 +435,7 @@ def sample_inputs_masked_normalize(op_info, device, dtype, requires_grad, **kwar
             )
 
 
-op_db: List[OpInfo] = [
+op_db: list[OpInfo] = [
     ReductionOpInfo(
         "masked.sum",
         ref=reference_reduction_numpy(np.sum),
@@ -446,6 +456,13 @@ op_db: List[OpInfo] = [
                 "test_reference_masked",
                 dtypes=(torch.bool, torch.int8, torch.int16, torch.int32),
             ),
+            # FIXME: improve precision
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                dtypes=(torch.float16,),
+            ),
             DecorateInfo(
                 unittest.expectedFailure,
                 "TestNormalizeOperators",
@@ -459,6 +476,21 @@ op_db: List[OpInfo] = [
             # RuntimeError: undefined value tensor
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
+            ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=[torch.complex128],
+            ),
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                device_type="xpu",
+                dtypes=[torch.complex128],
             ),
         ),
         decorators=[
@@ -535,6 +567,27 @@ op_db: List[OpInfo] = [
                 device_type="cuda",
                 dtypes=(torch.bool, *integral_types(), *complex_types()),
             ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                device_type="xpu",
+                dtypes=(torch.complex128, torch.int64, torch.uint8),
+            ),
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=(
+                    torch.int64,
+                    torch.int32,
+                    torch.int16,
+                    torch.int8,
+                    torch.complex128,
+                ),
+            ),
         ),
         decorators=[
             DecorateInfo(
@@ -557,6 +610,12 @@ op_db: List[OpInfo] = [
                 "TestMasked",
                 "test_mask_layout",
                 device_type="cpu",
+            ),
+            DecorateInfo(
+                toleranceOverride({torch.float32: tol(atol=1e-05, rtol=1e-05)}),
+                "TestOperators",
+                "test_jvp",
+                device_type="cuda",
             ),
         ],
         sample_inputs_func=sample_inputs_masked_reduction,
@@ -581,6 +640,10 @@ op_db: List[OpInfo] = [
             # NotSupportedError: Compiled functions can't ... use keyword-only arguments with defaults
             DecorateInfo(
                 unittest.skip("Skipped!"), "TestJit", "test_variant_consistency_jit"
+            ),
+            # The following dtypes worked in forward but are not listed by the OpInfo: {torch.bool}.
+            DecorateInfo(
+                unittest.expectedFailure, "TestCommon", "test_dtypes", device_type="mps"
             ),
         ),
         # Can reuse the same inputs; dim is required in both
@@ -614,10 +677,14 @@ op_db: List[OpInfo] = [
                 device_type="cuda",
             ),
             DecorateInfo(
-                toleranceOverride({torch.float16: tol(atol=2e-3, rtol=2e-3)}),
+                toleranceOverride({torch.float16: tol(atol=1e-2, rtol=2.6e-3)}),
                 "TestInductorOpInfo",
                 "test_comprehensive",
                 device_type="cuda",
+            ),
+            # The following dtypes worked in forward but are not listed by the OpInfo: {torch.bool}.
+            DecorateInfo(
+                unittest.expectedFailure, "TestCommon", "test_dtypes", device_type="mps"
             ),
         ),
         # Can reuse the same inputs; dim is required in both
@@ -656,6 +723,21 @@ op_db: List[OpInfo] = [
                 "TestMasked",
                 "test_mask_layout",
                 dtypes=(torch.bool, *integral_types(), *complex_types()),
+            ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                device_type="xpu",
+                dtypes=[torch.int64],
+            ),
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=[torch.int64],
             ),
         ),
         sample_inputs_func=sample_inputs_masked_reduction,
@@ -696,6 +778,21 @@ op_db: List[OpInfo] = [
                 "test_mask_layout",
                 dtypes=(torch.bool, *integral_types(), *complex_types()),
             ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                device_type="xpu",
+                dtypes=[torch.int64],
+            ),
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=[torch.int64],
+            ),
         ),
         sample_inputs_func=sample_inputs_masked_reduction,
         sample_inputs_sparse_coo_func=sample_inputs_sparse_coo_masked_reduction,
@@ -723,6 +820,16 @@ op_db: List[OpInfo] = [
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
             ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=floating_types_and(
+                    torch.int8, torch.int16, torch.int32, torch.int64, torch.float16
+                ),
+            ),
         ),
         sample_inputs_func=sample_inputs_masked_reduction,
         gradcheck_wrapper=gradcheck_wrapper_masked_operation,
@@ -748,6 +855,16 @@ op_db: List[OpInfo] = [
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
             ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=floating_types_and(
+                    torch.int8, torch.int16, torch.int32, torch.int64, torch.float16
+                ),
+            ),
         ),
         sample_inputs_func=sample_inputs_masked_reduction,
         gradcheck_wrapper=gradcheck_wrapper_masked_operation,
@@ -764,26 +881,8 @@ op_db: List[OpInfo] = [
         supports_forward_ad=True,
         supports_fwgrad_bwgrad=True,
         promotes_int_to_float=True,
-        dtypes=all_types_and_complex_and(torch.float16, torch.bfloat16, torch.bool),
+        dtypes=floating_and_complex_types_and(torch.float16, torch.bfloat16),
         skips=(
-            DecorateInfo(
-                unittest.expectedFailure,
-                "TestReductions",
-                "test_ref_duplicate_values",
-                dtypes=(torch.bool,),
-            ),
-            DecorateInfo(
-                unittest.expectedFailure,
-                "TestReductions",
-                "test_reference_masked",
-                dtypes=(torch.bool,),
-            ),
-            DecorateInfo(
-                unittest.expectedFailure,
-                "TestReductions",
-                "test_ref_small_input",
-                dtypes=(torch.bool,),
-            ),
             DecorateInfo(
                 unittest.expectedFailure,
                 "TestNormalizeOperators",
@@ -804,6 +903,21 @@ op_db: List[OpInfo] = [
                 "TestMasked",
                 "test_mask_layout",
                 dtypes=(torch.bool, *integral_types(), *complex_types()),
+            ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=[torch.complex128],
+            ),
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                device_type="xpu",
+                dtypes=[torch.complex128],
             ),
         ),
         decorators=[
@@ -849,6 +963,16 @@ op_db: List[OpInfo] = [
             # NotSupportedError: Compiled functions can't ... use keyword-only arguments with defaults
             DecorateInfo(
                 unittest.skip("Skipped!"), "TestJit", "test_variant_consistency_jit"
+            ),
+            # masked.median raises ValueError for fully-masked rows on
+            # non-floating dtypes, but the trivial 0-d sample exercised by
+            # test_dtypes succeeds for ints / bool / complex64, fooling the
+            # detector into believing these dtypes are supported.
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestCommon",
+                "test_dtypes",
+                device_type="mps",
             ),
         ),
         sample_inputs_func=partial(
@@ -923,6 +1047,21 @@ op_db: List[OpInfo] = [
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
             ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=[torch.complex128],
+            ),
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                device_type="xpu",
+                dtypes=[torch.complex128],
+            ),
         ),
         decorators=[
             DecorateInfo(
@@ -954,6 +1093,16 @@ op_db: List[OpInfo] = [
                 ),
                 "TestMasked",
                 "test_reference_masked",
+            ),
+            DecorateInfo(
+                toleranceOverride(
+                    {
+                        torch.float16: tol(atol=4e-5, rtol=2e-2),
+                    }
+                ),
+                "TestInductorOpInfo",
+                "test_comprehensive",
+                device_type="cuda",
             ),
         ],
         sample_inputs_func=sample_inputs_masked_std_var,
@@ -997,6 +1146,21 @@ op_db: List[OpInfo] = [
             # RuntimeError: undefined value tensor
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
+            ),
+            # Driver issue of XPU, see https://github.com/intel/torch-xpu-ops/issues/2295
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_ref_small_input",
+                device_type="xpu",
+                dtypes=[torch.complex128],
+            ),
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestReductions",
+                "test_reference_masked",
+                device_type="xpu",
+                dtypes=[torch.complex128],
             ),
         ),
         decorators=[
@@ -1054,6 +1218,14 @@ op_db: List[OpInfo] = [
         "masked.log_softmax",
         method_variant=None,
         dtypes=floating_types_and(torch.half, torch.bfloat16),
+        dtypesIfMPS=floating_types_and(
+            torch.half,
+            torch.bfloat16,
+            torch.uint8,
+            torch.int32,
+            torch.int16,
+            torch.int8,
+        ),
         sample_inputs_func=sample_inputs_masked_softmax,
         skips=(
             DecorateInfo(
@@ -1063,6 +1235,18 @@ op_db: List[OpInfo] = [
             ),
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
+            ),
+            # NotImplementedError: "log_softmax_lastdim_kernel_impl" not implemented for *
+            DecorateInfo(
+                unittest.expectedFailure,
+                "TestConsistency",
+                device_type="mps",
+                dtypes=(
+                    torch.uint8,
+                    torch.int32,
+                    torch.int16,
+                    torch.int8,
+                ),
             ),
         ),
         decorators=[
@@ -1091,6 +1275,16 @@ op_db: List[OpInfo] = [
             DecorateInfo(
                 unittest.expectedFailure, "TestJit", "test_variant_consistency_jit"
             ),
+            # FIXME:
+            # Mismatched elements: 2 / 2 (100.0%)
+            # Greatest absolute difference: nan at index (0,) (up to 0.0001 allowed)
+            # Greatest relative difference: nan at index (0,) (up to 0.0001 allowed
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestOperators",
+                "test_vmapvjpvjp",
+                device_type="cpu",
+            ),
         ),
         gradcheck_wrapper=gradcheck_wrapper_masked_operation,
         supports_forward_ad=True,
@@ -1102,6 +1296,14 @@ op_db: List[OpInfo] = [
         method_variant=None,
         dtypes=floating_and_complex_types_and(torch.half, torch.bfloat16),
         sample_inputs_func=sample_inputs_masked_normalize,
+        decorators=[
+            DecorateInfo(
+                toleranceOverride({torch.float16: tol(atol=2e-5, rtol=6e-3)}),
+                "TestInductorOpInfo",
+                "test_comprehensive",
+                device_type="cuda",
+            ),
+        ],
         skips=(
             DecorateInfo(
                 unittest.expectedFailure,
@@ -1148,7 +1350,7 @@ op_db: List[OpInfo] = [
     ),
     ReductionOpInfo(
         "masked.logsumexp",
-        dtypes=all_types_and(torch.half, torch.bfloat16),
+        dtypes=all_types_and_complex_and(torch.half, torch.bfloat16),
         method_variant=None,
         nan_policy="propagate",
         supports_out=False,
@@ -1177,6 +1379,16 @@ op_db: List[OpInfo] = [
             ),
             # all the values are the same except for -inf vs nan
             DecorateInfo(unittest.skip("Skipped!"), "TestDecomp", "test_comprehensive"),
+            # FIXME:
+            # Mismatched elements: 2 / 12 (16.7%)
+            # Greatest absolute difference: 9223372034707292160 at index (0, 0, 0, 0)
+            # Greatest relative difference: 0.0 at index (0, 0, 0, 1)
+            DecorateInfo(
+                unittest.skip("Skipped!"),
+                "TestInductorOpInfo",
+                "test_comprehensive",
+                device_type="cpu",
+            ),
         ),
         sample_inputs_func=sample_inputs_masked_reduction,
         gradcheck_wrapper=gradcheck_wrapper_masked_operation,

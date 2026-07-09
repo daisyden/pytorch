@@ -23,7 +23,8 @@
       case kSparseBsc:                                               \
         return __VA_ARGS__();                                        \
       default:                                                       \
-        AT_ERROR(                                                    \
+        TORCH_CHECK(                                                 \
+            false,                                                   \
             NAME,                                                    \
             " expected sparse compressed tensor layout but got ",    \
             the_layout);                                             \
@@ -42,7 +43,8 @@
       case kSparseBsc:                                            \
         return (COLUMN_DIM_ACTION)();                             \
       default:                                                    \
-        AT_ERROR(                                                 \
+        TORCH_CHECK(                                              \
+            false,                                                \
             NAME,                                                 \
             " expected sparse compressed tensor layout but got ", \
             the_layout);                                          \
@@ -61,7 +63,8 @@
       case kSparseBsc:                                            \
         return (BLOCK_ACTION)();                                  \
       default:                                                    \
-        AT_ERROR(                                                 \
+        TORCH_CHECK(                                              \
+            false,                                                \
             NAME,                                                 \
             " expected sparse compressed tensor layout but got ", \
             the_layout);                                          \
@@ -77,7 +80,8 @@
       case kSparseBsr:                                                \
         return (ROW_DIM_ACTION)();                                    \
       default:                                                        \
-        AT_ERROR(                                                     \
+        TORCH_CHECK(                                                  \
+            false,                                                    \
             NAME,                                                     \
             " expected sparse row compressed tensor layout but got ", \
             the_layout);                                              \
@@ -93,7 +97,8 @@
       case kSparseBsc:                                                   \
         return (COL_DIM_ACTION)();                                       \
       default:                                                           \
-        AT_ERROR(                                                        \
+        TORCH_CHECK(                                                     \
+            false,                                                       \
             NAME,                                                        \
             " expected sparse column compressed tensor layout but got ", \
             the_layout);                                                 \
@@ -108,7 +113,8 @@
       case kSparseCsc:                                                        \
         return (ACTION)();                                                    \
       default:                                                                \
-        AT_ERROR(                                                             \
+        TORCH_CHECK(                                                          \
+            false,                                                            \
             NAME,                                                             \
             " expected sparse compressed (non-block) tensor layout but got ", \
             the_layout);                                                      \
@@ -123,7 +129,8 @@
       case kSparseBsc:                                                    \
         return (ACTION)();                                                \
       default:                                                            \
-        AT_ERROR(                                                         \
+        TORCH_CHECK(                                                      \
+            false,                                                        \
             NAME,                                                         \
             " expected sparse compressed block tensor layout but got ",   \
             the_layout);                                                  \
@@ -134,10 +141,31 @@
   AT_DISPATCH_SWITCH(                                   \
       TYPE,                                             \
       NAME,                                             \
-      AT_DISPATCH_CASE_ALL_TYPES_AND_COMPLEX_AND4(      \
-          kComplexHalf, kHalf, kBool, kBFloat16, __VA_ARGS__))
+      AT_DISPATCH_CASE_ALL_TYPES_AND_COMPLEX_AND5(      \
+          kComplexHalf, kBComplex32, kHalf, kBool, kBFloat16, __VA_ARGS__))
 
 namespace at::sparse_csr {
+
+// Implements RAII object to manage checking sparse tensor invariants:
+class CheckSparseTensorInvariants {
+  std::optional<bool> old_state;
+
+ public:
+  CheckSparseTensorInvariants(bool state)
+      : old_state(at::globalContext().checkSparseTensorInvariants()) {
+    at::globalContext().setCheckSparseTensorInvariants(state);
+  }
+  CheckSparseTensorInvariants(CheckSparseTensorInvariants&& other) = delete;
+  CheckSparseTensorInvariants(const CheckSparseTensorInvariants&) = delete;
+  CheckSparseTensorInvariants& operator=(const CheckSparseTensorInvariants&) =
+      delete;
+  CheckSparseTensorInvariants& operator=(CheckSparseTensorInvariants&&) =
+      delete;
+
+  ~CheckSparseTensorInvariants() {
+    at::globalContext().setCheckSparseTensorInvariants(old_state);
+  }
+};
 
 using SparseCsrTensor = Tensor;
 
@@ -413,7 +441,7 @@ inline std::tuple<Tensor, Tensor> create_acc_buffer(
     return std::make_tuple(
         new_values.resize_(nnz), new_values_acc.resize_(nnz));
   } else {
-    return std::make_tuple(new_values, new_values_acc);
+    return std::make_tuple(std::move(new_values), std::move(new_values_acc));
   }
 }
 

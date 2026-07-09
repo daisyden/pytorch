@@ -1,12 +1,16 @@
 # Owner(s): ["module: dynamo"]
 
+import collections
 import re
 import sys
+import time
+import typing
 from io import StringIO
 
 import torch._dynamo.test_case
 import torch._dynamo.testing
 from torch._dynamo.comptime import comptime
+
 
 # Because we don't support free variables in comptime at the moment,
 # we have to communicate via globals.  This also means these tests cannot
@@ -17,12 +21,79 @@ SELF = None
 
 
 class ComptimeTests(torch._dynamo.test_case.TestCase):
+    def test_print_single(self):
+        global FILE
+        FILE = StringIO()
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        def comptime_print(e):
+            @comptime
+            def _(ctx):
+                ctx.print(ctx.get_local("e"), file=FILE)
+
+        class Employee(typing.NamedTuple):
+            name: object
+            id: object
+
+        class mylist(list):
+            pass
+
+        @torch.compile(backend=cnt, dynamic=True)
+        def f(x):
+            y = x * 2
+            comptime_print(y)
+            comptime_print(2)
+            comptime_print([y, 2])
+            comptime_print((y, 2))
+            comptime_print({"foo": y})
+            comptime_print(range(1, 3))
+            comptime_print(Employee("foo", 2))
+            comptime_print(mylist([1, 2]))
+            comptime_print(set())
+            comptime_print({"a", "b"})
+            comptime_print(x.size(0))
+            return y + 3
+
+        f(torch.randn(2))
+        self.assertEqual(cnt.frame_count, 1)
+        self.assertExpectedInline(
+            FILE.getvalue().strip(),
+            """\
+Tensor(shape=(s77,), dtype=torch.float32)
+2
+[Tensor(shape=(s77,), dtype=torch.float32), 2]
+(Tensor(shape=(s77,), dtype=torch.float32), 2)
+{'foo': Tensor(shape=(s77,), dtype=torch.float32)}
+range(1, 3)
+Employee(name='foo', id=2)
+UserDefinedListVariable(mylist)
+set()
+{'a', 'b'}
+s77""",
+        )
+
+        FILE = StringIO()
+
+        @torch.compile(backend=cnt, dynamic=True)
+        def g(x):
+            comptime_print(collections.defaultdict(lambda: None))
+
+        g(torch.randn(2))
+
+        # it seems different pythons in CI change the
+        # function str repr. Since this doesn't seem that
+        # important, we just be very lenient
+        self.assertIn(
+            "defaultdict",
+            FILE.getvalue().strip(),
+        )
+
     def test_print_graph(self):
         global FILE
         FILE = StringIO()
         cnt = torch._dynamo.testing.CompileCounter()
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x * 2
 
@@ -43,7 +114,7 @@ class ComptimeTests(torch._dynamo.test_case.TestCase):
             """\
 def forward(self, L_x_ : torch.Tensor):
     l_x_ = L_x_
-    y = l_x_ * 2;  l_x_ = None""",
+    y = l_x_ * 2;  l_x_ = y = None""",
         )
 
     def test_print_disas(self):
@@ -51,7 +122,7 @@ def forward(self, L_x_ : torch.Tensor):
         FILE = StringIO()
         cnt = torch._dynamo.testing.CompileCounter()
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x * 2
 
@@ -95,7 +166,7 @@ def forward(self, L_x_ : torch.Tensor):
 
             return x
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x + g(x)
 
@@ -106,7 +177,7 @@ def forward(self, L_x_ : torch.Tensor):
         self.assertExpectedInline(
             FILE.getvalue(),
             """\
-- TensorVariable()
+- Tensor(shape=(2,), dtype=torch.float32)
 """,
         )
 
@@ -115,7 +186,7 @@ def forward(self, L_x_ : torch.Tensor):
         FILE = StringIO()
         cnt = torch._dynamo.testing.CompileCounter()
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x * 2
 
@@ -132,10 +203,70 @@ def forward(self, L_x_ : torch.Tensor):
         self.assertExpectedInline(
             FILE.getvalue(),
             """\
-x = TensorVariable()
-y = TensorVariable()
+x = Tensor(shape=(2,), dtype=torch.float32)
+y = Tensor(shape=(2,), dtype=torch.float32)
 """,
         )
+
+    # Just make sure it doesn't crash
+    def test_print_direct(self):
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @torch.compile(backend=cnt)
+        def f(x, z):
+            y = x * 2
+            lambda: z
+            comptime.print(z)
+            return y + 3
+
+        f(torch.randn(2), torch.randn(2))
+
+    def test_sleep(self):
+        sleep_time = 5
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @torch.compile(backend=cnt)
+        def f(x, z, should_sleep):
+            if should_sleep:
+                comptime.sleep(sleep_time)
+            y = x * 2
+            return y + 3
+
+        start = time.time()
+        f(torch.randn(2), torch.randn(2), False)
+        total_no_sleep = time.time() - start
+
+        start = time.time()
+        f(torch.randn(2), torch.randn(2), True)
+        total_with_sleep = time.time() - start
+
+        self.assertTrue(total_with_sleep > sleep_time)
+        # Hopefully this won't be flaky
+        self.assertTrue(abs(total_with_sleep - sleep_time - total_no_sleep) < 3)
+
+    # Just make sure it doesn't crash
+    def test_get_local_closure_variable(self):
+        global SELF
+        SELF = self
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @torch.compile(backend=cnt)
+        def f(x):
+            z = 3
+
+            def g():
+                @comptime
+                def _(ctx):
+                    r = ctx.get_local("z")
+                    SELF.assertEqual(repr(r), "3")
+
+                comptime.print(z)
+                return 2
+
+            y = x * g()
+            return y + 3
+
+        f(torch.randn(2))
 
     def test_print_bt(self):
         global FILE
@@ -151,7 +282,7 @@ y = TensorVariable()
 
             return x + 3
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x * 2
             y = g(y)
@@ -170,7 +301,7 @@ y = TensorVariable()
         FILE = StringIO()
         cnt = torch._dynamo.testing.CompileCounter()
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x * 2
 
@@ -195,6 +326,13 @@ y = TensorVariable()
             'obj_weakref': None
             'guarded_class': None
         }
+        global '' AUTOGRAD_SAVED_TENSORS_HOOKS
+        {
+            'guard_types': None,
+            'code': None,
+            'obj_weakref': None
+            'guarded_class': None
+        }
         global '' GRAD_MODE
         {
             'guard_types': None,
@@ -203,6 +341,13 @@ y = TensorVariable()
             'guarded_class': None
         }
         global '' DETERMINISTIC_ALGORITHMS
+        {
+            'guard_types': None,
+            'code': None,
+            'obj_weakref': None
+            'guarded_class': None
+        }
+        global '' GLOBAL_STATE
         {
             'guard_types': None,
             'code': None,
@@ -235,7 +380,7 @@ y = TensorVariable()
     def test_graph_break(self):
         cnt = torch._dynamo.testing.CompileCounter()
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x * 2
 
@@ -249,7 +394,7 @@ y = TensorVariable()
         self.assertEqual(cnt.frame_count, 1)
         cnt.frame_count = 0
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def g(x):
             y = x * 2
 
@@ -272,10 +417,10 @@ y = TensorVariable()
         FILE = StringIO()
         cnt = torch._dynamo.testing.CompileCounter()
 
-        @torch._dynamo.optimize(cnt)
+        @torch.compile(backend=cnt)
         def f(x):
             y = x * 2
-            lit = 2
+            lit = 2  # noqa: F841
 
             @comptime
             def _(ctx):
@@ -302,7 +447,7 @@ y = TensorVariable()
 def forward(self, L_x_ : torch.Tensor):
     l_x_ = L_x_
     y = l_x_ * 2;  l_x_ = None
-    add = y + 4;  y = None""",
+    add = y + 4;  y = add = None""",
         )
 
 

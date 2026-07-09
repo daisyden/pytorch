@@ -31,9 +31,9 @@ namespace torch::jit {
 template <typename T>
 class unwrapping_shared_ptr {
   static_assert(
-      std::is_same<T, torch::jit::Value>::value ||
-          std::is_same<T, torch::jit::Node>::value ||
-          std::is_same<T, torch::jit::Block>::value,
+      std::is_same_v<T, torch::jit::Value> ||
+          std::is_same_v<T, torch::jit::Node> ||
+          std::is_same_v<T, torch::jit::Block>,
       "unwrapping type only defined for Graph object types");
 
  private:
@@ -65,7 +65,7 @@ class unwrapping_shared_ptr {
 
 } // namespace torch::jit
 
-PYBIND11_DECLARE_HOLDER_TYPE(T, torch::jit::unwrapping_shared_ptr<T>, true);
+PYBIND11_DECLARE_HOLDER_TYPE(T, torch::jit::unwrapping_shared_ptr<T>, true)
 
 namespace pybind11::detail {
 
@@ -90,7 +90,7 @@ namespace pybind11::detail {
    protected:                                                                             \
     friend class type_caster_generic;                                                     \
                                                                                           \
-    bool load_value(value_and_holder&& v_h) {                                             \
+    bool load_value(const value_and_holder& v_h) {                                        \
       if (v_h.holder_constructed()) {                                                     \
         value = v_h.template holder<holder_type>().get();                                 \
         return true;                                                                      \
@@ -113,11 +113,11 @@ struct type_caster<torch::jit::IValue> {
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(torch::jit::IValue, _("IValue"));
 
-  bool load(handle src, bool) {
+  bool load(handle src, bool /*unused*/) {
     try {
       value = torch::jit::toTypeInferredIValue(src);
       return true;
-    } catch (std::exception& e) {
+    } catch (std::exception&) {
       return false;
     }
   }
@@ -136,13 +136,13 @@ struct type_caster<torch::jit::Symbol> {
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(torch::jit::Symbol, _("Symbol"));
 
-  bool load(handle src, bool) {
+  bool load(handle src, bool /*unused*/) {
     // TODO: Is there a way to py::cast that doesn't raise an exception on
     // failure?  Can we catch pybind11::cast_error here instead?
     std::string src_str;
     try {
       src_str = py::cast<std::string>(src);
-    } catch (std::exception& e) {
+    } catch (std::exception&) {
       return false;
     }
     value = torch::jit::Symbol::fromQualString(src_str);
@@ -164,7 +164,7 @@ struct type_caster<torch::jit::AttributeKind> {
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(torch::jit::AttributeKind, _("AttributeKind"));
 
-  bool load(handle src, bool) {
+  bool load(handle src, bool /*unused*/) {
     return false;
   }
 
@@ -186,7 +186,7 @@ template <>
 struct type_caster<std::vector<torch::jit::Node*>> : ListCasterBase {
   static handle cast(
       const std::vector<torch::jit::Node*>& src,
-      return_value_policy,
+      return_value_policy /*unused*/,
       handle parent) {
     return ListCasterBase::cast(src, return_value_policy::reference, parent);
   }

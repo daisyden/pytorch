@@ -22,11 +22,11 @@ import os
 import os.path
 
 import numpy as np
+from PIL import Image
+from torchvision import transforms
 
 import torch
 import torch.utils.data as data
-import torchvision.transforms as transforms
-from PIL import Image
 
 
 class Omniglot(data.Dataset):
@@ -169,11 +169,9 @@ class OmniglotNShot:
                 ),
             )
 
-            temp = (
-                {}
-            )  # {label:img1, img2..., 20 imgs, label2: img1, img2,... in total, 1623 label}
+            temp = {}  # {label:img1, img2..., 20 imgs, label2: img1, img2,... in total, 1623 label}
             for img, label in self.x:
-                if label in temp.keys():
+                if label in temp:
                     temp[label].append(img)
                 else:
                     temp[label] = [img]
@@ -211,7 +209,10 @@ class OmniglotNShot:
         self.n_way = n_way  # n way
         self.k_shot = k_shot  # k shot
         self.k_query = k_query  # k query
-        assert (k_shot + k_query) <= 20
+        if (k_shot + k_query) > 20:
+            raise AssertionError(
+                f"k_shot + k_query must be <= 20, got {k_shot + k_query}"
+            )
 
         # save pointer of current read batch in total cache
         self.indexes = {"train": 0, "test": 0}

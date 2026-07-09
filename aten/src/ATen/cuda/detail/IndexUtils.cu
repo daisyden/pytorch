@@ -1,9 +1,7 @@
 #include <ATen/cuda/detail/IndexUtils.cuh>
 #include <vector>
 
-namespace at {
-namespace cuda {
-namespace detail {
+namespace at::cuda::detail {
 
 struct SizeAndStride {
   int64_t size;
@@ -37,7 +35,7 @@ within the next one.
 bool maybeOverlappingIndices(const TensorBase& t) {
   /* Extract size/stride arrays; only consider size >1 dims. */
   std::vector<SizeAndStride> info(t.dim());
-  int dims = t.dim();
+  auto dims = t.dim();
   int nonSize1Dims = 0;
   for (int i = 0; i < dims; ++i) {
     int64_t size = t.size(i);
@@ -70,6 +68,4 @@ bool maybeOverlappingIndices(const TensorBase& t) {
   return false;
 }
 
-} // detail
-} // cuda
-} // at
+} // namespace at::cuda::detail

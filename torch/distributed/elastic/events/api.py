@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# mypy: allow-untyped-defs
 
 # Copyright (c) Facebook, Inc. and its affiliates.
 # All rights reserved.
@@ -9,11 +10,12 @@
 import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Dict, Union, Optional
+from typing import Union
 
-__all__ = ['EventSource', 'Event', 'NodeState', 'RdzvEvent']
 
-EventMetadataValue = Union[str, int, float, bool, None]
+__all__ = ["EventSource", "Event", "NodeState", "RdzvEvent"]
+
+EventMetadataValue = str | int | float | bool | None
 
 
 class EventSource(str, Enum):
@@ -40,7 +42,7 @@ class Event:
     name: str
     source: EventSource
     timestamp: int = 0
-    metadata: Dict[str, EventMetadataValue] = field(default_factory=dict)
+    metadata: dict[str, EventMetadataValue] = field(default_factory=dict)
 
     def __str__(self):
         return self.serialize()
@@ -52,6 +54,7 @@ class Event:
         if isinstance(data, str):
             data_dict = json.loads(data)
         data_dict["source"] = EventSource[data_dict["source"]]  # type: ignore[possibly-undefined]
+        # pyrefly: ignore [unbound-name]
         return Event(**data_dict)
 
     def serialize(self) -> str:
@@ -92,8 +95,8 @@ class RdzvEvent:
     pid: int
     node_state: NodeState
     master_endpoint: str = ""
-    rank: Optional[int] = None
-    local_id: Optional[int] = None
+    rank: int | None = None
+    local_id: int | None = None
     error_trace: str = ""
 
     def __str__(self):
@@ -106,6 +109,7 @@ class RdzvEvent:
         if isinstance(data, str):
             data_dict = json.loads(data)
         data_dict["node_state"] = NodeState[data_dict["node_state"]]  # type: ignore[possibly-undefined]
+        # pyrefly: ignore [unbound-name]
         return RdzvEvent(**data_dict)
 
     def serialize(self) -> str:

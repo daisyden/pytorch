@@ -3,7 +3,7 @@
 import inspect
 import random
 import unittest
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 import torch.fx as fx
@@ -13,6 +13,7 @@ from functorch.compile import memory_efficient_fusion
 from torch._functorch.compile_utils import fx_graph_cse
 from torch.nn import functional as F
 from torch.testing._internal.common_utils import run_tests, TestCase
+
 
 HAS_CUDA = torch.cuda.is_available()
 
@@ -106,7 +107,7 @@ def run_and_compare_activation(self, fn, inps):
             torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
             for shape in inps
         ]
-        res_args = [i.clone().detach().requires_grad_(True) for i in ref_args]
+        res_args = [i.detach().clone().requires_grad_(True) for i in ref_args]
 
         ref = fn(*ref_args)
         ref.sum().backward()
@@ -207,33 +208,36 @@ def check(f, t, delta, check_val=True, graph_input=False):
     old_num_nodes = len(fx_g.graph.nodes)
     new_num_nodes = len(new_graph.nodes)
     if delta == -1:
-        assert (
-            old_num_nodes >= new_num_nodes
-        ), f"number of nodes increased {old_num_nodes}, {new_num_nodes}"
+        if old_num_nodes < new_num_nodes:
+            raise AssertionError(
+                f"number of nodes increased {old_num_nodes}, {new_num_nodes}"
+            )
     else:
-        assert (
-            old_num_nodes == new_num_nodes + delta
-        ), f"number of nodes not the same {old_num_nodes - delta}, {new_num_nodes}\n {fx_g.graph} \n {new_graph}"
+        if old_num_nodes != new_num_nodes + delta:
+            raise AssertionError(
+                f"number of nodes not the same {old_num_nodes - delta}, {new_num_nodes}\n {fx_g.graph} \n {new_graph}"
+            )
 
     # a second pass should not reduce more nodes
     pass_2_graph = fx_graph_cse(new_graph)
     pass_2_num_nodes = len(pass_2_graph.nodes)
-    assert (
-        pass_2_num_nodes == new_num_nodes
-    ), f"second pass graph has less node {pass_2_num_nodes}, {new_num_nodes}\n {new_graph} \n {pass_2_graph}"
+    if pass_2_num_nodes != new_num_nodes:
+        raise AssertionError(
+            f"second pass graph has less node {pass_2_num_nodes}, {new_num_nodes}\n {new_graph} \n {pass_2_graph}"
+        )
 
     # check correctness
     if check_val:
         true_result = fx_g(t)
         our_result = new_g(t)
         if true_result is None:  # both return None
-            assert (
-                our_result is None
-            ), f"true result is None, CSE result is {our_result}"
+            if our_result is not None:
+                raise AssertionError(f"true result is None, CSE result is {our_result}")
         else:  # results returned are the same
-            assert torch.all(
-                true_result == our_result
-            ), f"results are different {true_result}, {our_result}"  # check results are the same
+            if not torch.all(true_result == our_result):
+                raise AssertionError(
+                    f"results are different {true_result}, {our_result}"
+                )
 
 
 class NoChangeTestCase(TestCase):
@@ -300,7 +304,8 @@ class NoChangeTestCase(TestCase):
 
         t = torch.rand(3, 100)
         _ = fn(t, 50)
-        assert len(gms) == 1, gms
+        if len(gms) != 1:
+            raise AssertionError(f"Expected 1 graph module, got {len(gms)}: {gms}")
         fx_g = gms[0]
         check(fx_g, None, 0, check_val=False, graph_input=True)
 

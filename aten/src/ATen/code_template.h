@@ -19,6 +19,10 @@ namespace at::jit {
 struct TemplateEnv {
   TemplateEnv() = default;
   TemplateEnv(TemplateEnv& parent) : parent(&parent) {}
+  TemplateEnv(TemplateEnv&&) = delete;
+  TemplateEnv& operator=(const TemplateEnv& parent) = delete;
+  TemplateEnv& operator=(TemplateEnv&& parent) = delete;
+  ~TemplateEnv() = default;
 
   using string_list = std::vector<std::string>;
 
@@ -31,7 +35,7 @@ struct TemplateEnv {
   // Add a number 'v' to the map at key 'k'
   template <typename T>
   void d(const std::string& k, const T& v) {
-    strings_[k] = c10::to_string(v);
+    strings_[k] = std::to_string(v);
     lists_.erase(k);
   }
 
@@ -80,7 +84,7 @@ struct TemplateEnv {
   [[noreturn]] void notFound(const std::string& k) const {
     std::stringstream ss;
     ss << "key not found: " << k;
-    throw std::logic_error(ss.str());
+    throw std::logic_error(std::move(ss).str());
   }
 
   std::unordered_map<std::string, std::string> strings_;
@@ -109,12 +113,10 @@ struct CodeTemplate {
       char c = template_text[pos];
       if (c == '$') {
         std::stringstream kss;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-        bool comma_before;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-        bool comma_after;
+        bool comma_before = false;
+        bool comma_after = false;
         size_t new_pos = parseKey(pos, kss, comma_before, comma_after);
-        std::string k = kss.str();
+        std::string k = std::move(kss).str();
         bool is_string = env.keyIsString(k);
         if (all_whitespace) {
           if (is_string)
@@ -141,7 +143,7 @@ struct CodeTemplate {
         pos++;
       }
     }
-    return out.str();
+    return std::move(out).str();
   }
 
  private:
@@ -206,8 +208,8 @@ struct CodeTemplate {
   // or trailing newlines. It's the responsibility of the calling function
   // to indent correctly in the context.
   void emitIndent(std::ostream& out, size_t indent) const {
-    for (C10_UNUSED const auto i : c10::irange(indent)) {
-      out << " ";
+    for ([[maybe_unused]] const auto i : c10::irange(indent)) {
+      out << ' ';
     }
   }
   void emitStringWithIndents(
@@ -230,7 +232,7 @@ struct CodeTemplate {
         emitIndent(out, indent);
       emitStringWithIndents(out, indent, strings[i]);
       if (i + 1 != strings.size())
-        out << "\n";
+        out << '\n';
     }
   }
   std::string template_text;

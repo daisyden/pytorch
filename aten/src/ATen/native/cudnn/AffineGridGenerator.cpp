@@ -25,7 +25,8 @@ Tensor cudnn_affine_grid_generator_forward(
     int64_t C,
     int64_t H,
     int64_t W) {
-  AT_ERROR(
+  TORCH_CHECK(
+      false,
       "cudnn_affine_grid_generator_forward: ATen not compiled with cuDNN support");
 }
 
@@ -35,7 +36,8 @@ Tensor cudnn_affine_grid_generator_backward(
     int64_t C,
     int64_t H,
     int64_t W) {
-  AT_ERROR(
+  TORCH_CHECK(
+      false,
       "cudnn_affine_grid_generator_backward: ATen not compiled with cuDNN support");
 }
 
@@ -53,8 +55,7 @@ Tensor cudnn_affine_grid_generator_backward(
 
 #include <ATen/TensorUtils.h>
 
-namespace at {
-namespace native {
+namespace at::native {
 
 namespace {
 
@@ -120,7 +121,6 @@ Tensor cudnn_affine_grid_generator_backward(
   return grad_theta_t;
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native
 
 #endif // AT_CUDNN_ENABLED()

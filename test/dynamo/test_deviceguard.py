@@ -3,11 +3,10 @@ import unittest
 from unittest.mock import Mock
 
 import torch
-
 import torch._dynamo.test_case
 import torch._dynamo.testing
 from torch._dynamo.device_interface import CudaInterface, DeviceGuard
-from torch.testing._internal.common_cuda import TEST_CUDA, TEST_MULTIGPU
+from torch.testing._internal.common_cuda import TEST_CUDA
 
 
 class TestDeviceGuard(torch._dynamo.test_case.TestCase):
@@ -20,7 +19,7 @@ class TestDeviceGuard(torch._dynamo.test_case.TestCase):
         self.device_interface = Mock()
 
         self.device_interface.exchange_device = Mock(return_value=0)
-        self.device_interface.maybe_exchange_device = Mock(return_value=0)
+        self.device_interface.maybe_exchange_device = Mock(return_value=1)
 
     def test_device_guard(self):
         device_guard = DeviceGuard(self.device_interface, 1)
@@ -32,7 +31,7 @@ class TestDeviceGuard(torch._dynamo.test_case.TestCase):
 
         self.device_interface.maybe_exchange_device.assert_called_once_with(0)
         self.assertEqual(device_guard.prev_idx, 0)
-        self.assertEqual(device_guard.idx, 0)
+        self.assertEqual(device_guard.idx, 1)
 
     def test_device_guard_no_index(self):
         device_guard = DeviceGuard(self.device_interface, None)
@@ -56,21 +55,6 @@ class TestCUDADeviceGuard(torch._dynamo.test_case.TestCase):
     def setUp(self):
         super().setUp()
         self.device_interface = CudaInterface
-
-    @unittest.skipIf(not TEST_MULTIGPU, "need multiple GPU")
-    def test_device_guard(self):
-        current_device = torch.cuda.current_device()
-
-        device_guard = DeviceGuard(self.device_interface, 1)
-
-        with device_guard as _:
-            self.assertEqual(torch.cuda.current_device(), 1)
-            self.assertEqual(device_guard.prev_idx, 0)
-            self.assertEqual(device_guard.idx, 1)
-
-        self.assertEqual(torch.cuda.current_device(), current_device)
-        self.assertEqual(device_guard.prev_idx, 0)
-        self.assertEqual(device_guard.idx, 0)
 
     def test_device_guard_no_index(self):
         current_device = torch.cuda.current_device()

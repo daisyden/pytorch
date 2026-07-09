@@ -12,8 +12,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace torch {
-namespace nn {
+namespace torch::nn {
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ L1Loss ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -704,7 +703,7 @@ struct TORCH_API NLLLossImpl : public Cloneable<NLLLossImpl> {
   /// The options with which this `Module` was constructed.
   NLLLossOptions options;
 
-  /// A manual rescaling weight given to to each class.
+  /// A manual rescaling weight given to each class.
   Tensor weight;
 };
 
@@ -744,7 +743,7 @@ struct TORCH_API CrossEntropyLossImpl : public Cloneable<CrossEntropyLossImpl> {
   /// The options with which this `Module` was constructed.
   CrossEntropyLossOptions options;
 
-  /// A manual rescaling weight given to to each class.
+  /// A manual rescaling weight given to each class.
   Tensor weight;
 };
 
@@ -801,5 +800,4 @@ struct TORCH_API BCEWithLogitsLossImpl
 /// `ModuleHolder` to learn about PyTorch's module storage semantics.
 TORCH_MODULE(BCEWithLogitsLoss);
 
-} // namespace nn
-} // namespace torch
+} // namespace torch::nn

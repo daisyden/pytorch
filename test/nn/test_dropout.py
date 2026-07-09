@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing._internal.common_cuda import TEST_CUDA
 from torch.testing._internal.common_device_type import (
+    dtypes,
+    dtypesIfMPS,
     expectedFailureXLA,
     instantiate_device_type_tests,
 )
@@ -74,8 +76,12 @@ class TestDropoutNN(NNTestCase):
                     o_ref = torch.dropout(x_ref, p, train)
                     o.sum().backward()
                     o_ref.sum().backward()
-                    assert o.equal(o_ref)
-                    assert x.grad.equal(x_ref.grad)
+                    if not o.equal(o_ref):
+                        raise AssertionError("Expected o.equal(o_ref) to be True")
+                    if not x.grad.equal(x_ref.grad):
+                        raise AssertionError(
+                            "Expected x.grad.equal(x_ref.grad) to be True"
+                        )
 
     def test_invalid_dropout_p(self):
         v = torch.ones(1)
@@ -207,11 +213,13 @@ class TestDropoutNNDeviceType(NNTestCase):
             self.assertTrue(result[b, c].count_nonzero() in (0, channel_numel))
 
     @expectedFailureXLA  # seems like freeze_rng_state is not honoured by XLA
-    def test_Dropout1d(self, device):
-        with set_default_dtype(torch.double):
+    @dtypes(torch.double)
+    @dtypesIfMPS(torch.float32)
+    def test_Dropout1d(self, device, dtype):
+        with set_default_dtype(dtype):
             N, C, L = (
-                random.randint(10, 15),
-                random.randint(10, 15),
+                random.randint(50, 60),
+                random.randint(50, 60),
                 random.randint(10, 15),
             )
             input = torch.empty(N, C, L)
@@ -315,7 +323,7 @@ class TestDropoutNNDeviceType(NNTestCase):
         self.assertEqual(out.size(), x.size())
 
 
-instantiate_device_type_tests(TestDropoutNNDeviceType, globals())
+instantiate_device_type_tests(TestDropoutNNDeviceType, globals(), allow_mps=True)
 instantiate_parametrized_tests(TestDropoutNN)
 
 if __name__ == "__main__":

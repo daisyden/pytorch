@@ -19,32 +19,50 @@ namespace native {
 std::tuple<Tensor, Tensor, Tensor, Tensor> cudnn_batch_norm(
     const Tensor& input,
     const Tensor& weight,
-    const c10::optional<Tensor>& bias_opt,
-    const c10::optional<Tensor>& running_mean_opt,
-    const c10::optional<Tensor>& running_var_opt,
+    const std::optional<Tensor>& bias_opt,
+    const std::optional<Tensor>& running_mean_opt,
+    const std::optional<Tensor>& running_var_opt,
     bool training,
     double exponential_average_factor,
     double epsilon) {
-  AT_ERROR("cudnn_batch_norm: ATen not compiled with cuDNN support");
+  TORCH_CHECK(false, "cudnn_batch_norm: ATen not compiled with cuDNN support");
+}
+
+std::tuple<Tensor&, Tensor&, Tensor&, Tensor&> cudnn_batch_norm_out(
+    const Tensor& input,
+    const Tensor& weight,
+    const std::optional<Tensor>& bias,
+    const std::optional<Tensor>& running_mean,
+    const std::optional<Tensor>& running_var,
+    bool training,
+    double exponential_average_factor,
+    double epsilon,
+    Tensor& out,
+    Tensor& save_mean,
+    Tensor& save_var,
+    Tensor& reserve) {
+  AT_ERROR("cudnn_batch_norm_out: ATen not compiled with cuDNN support");
 }
 
 std::tuple<Tensor, Tensor, Tensor> cudnn_batch_norm_backward(
     const Tensor& input,
     const Tensor& grad_output,
     const Tensor& weight,
-    const c10::optional<Tensor>& running_mean_opt,
-    const c10::optional<Tensor>& running_var_opt,
-    const c10::optional<Tensor>& save_mean_opt,
-    const c10::optional<Tensor>& save_var_opt,
+    const std::optional<Tensor>& running_mean_opt,
+    const std::optional<Tensor>& running_var_opt,
+    const std::optional<Tensor>& save_mean_opt,
+    const std::optional<Tensor>& save_var_opt,
     double epsilon,
     const Tensor& reservedSpace) {
-  AT_ERROR("cudnn_batch_norm_backward: ATen not compiled with cuDNN support");
+  TORCH_CHECK(
+      false, "cudnn_batch_norm_backward: ATen not compiled with cuDNN support");
 }
 
 size_t _get_cudnn_batch_norm_reserve_space_size(
     const Tensor& input_t,
     bool training) {
-  AT_ERROR(
+  TORCH_CHECK(
+      false,
       "_get_cudnn_batch_norm_reserve_space_size: ATen not compiled with cuDNN support");
 }
 
@@ -69,8 +87,7 @@ size_t _get_cudnn_batch_norm_reserve_space_size(
 #include <ATen/ops/empty_like.h>
 #endif
 
-namespace at {
-namespace native {
+namespace at::native {
 
 namespace {
 
@@ -118,23 +135,30 @@ size_t _get_cudnn_batch_norm_reserve_space_size(
   return reserve_size;
 }
 
-std::tuple<Tensor, Tensor, Tensor, Tensor> cudnn_batch_norm(
+// Param `reserve` is a placeholder, just passing an empty tensor.
+// usage:
+// auto reserve = torch::empty({0}, torch::device(torch::kCUDA));
+// at::native::cudnn_batch_norm_out(..., epsilon, output, save_mean, save_var,
+// reserve);
+std::tuple<Tensor&, Tensor&, Tensor&, Tensor&> cudnn_batch_norm_out(
     const Tensor& input_t,
     const Tensor& weight_t,
-    const c10::optional<Tensor>& bias_t_opt,
-    const c10::optional<Tensor>& running_mean_t_opt,
-    const c10::optional<Tensor>& running_var_t_opt,
+    const std::optional<Tensor>& bias_t_opt,
+    const std::optional<Tensor>& running_mean_t_opt,
+    const std::optional<Tensor>& running_var_t_opt,
     bool training,
     double exponential_average_factor,
-    double epsilon) {
+    double epsilon,
+    Tensor& output_t,
+    Tensor& save_mean,
+    Tensor& save_var,
+    Tensor& reserve) {
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> bias_t_maybe_owned =
       at::borrow_from_optional_tensor(bias_t_opt);
   const Tensor& bias_t = *bias_t_maybe_owned;
-  const Tensor& running_mean_t =
-      c10::value_or_else(running_mean_t_opt, [] { return Tensor(); });
-  const Tensor& running_var_t =
-      c10::value_or_else(running_var_t_opt, [] { return Tensor(); });
+  const Tensor& running_mean_t = running_mean_t_opt.value_or(Tensor());
+  const Tensor& running_var_t = running_var_t_opt.value_or(Tensor());
 
   TensorArg input{input_t, "input", 1}, weight{weight_t, "weight", 2},
       bias{bias_t, "bias", 3}, running_mean{running_mean_t, "running_mean", 4},
@@ -168,9 +192,6 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> cudnn_batch_norm(
   cudnnBatchNormMode_t mode = getCudnnBatchNormMode(
       training, input->suggest_memory_format(), input->dim());
 
-  auto output_t =
-      at::empty_like(*input, input->options(), input->suggest_memory_format());
-
   TensorArg output{output_t, "output", 0};
 
   auto handle = getCudnnHandle();
@@ -182,15 +203,8 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> cudnn_batch_norm(
 
   Constant one(dataType, 1);
   Constant zero(dataType, 0);
-  Tensor save_mean, save_var;
-
-  Tensor reserve;
 
   if (training) {
-    int64_t num_features = input_t.size(1);
-    save_mean = at::empty({num_features}, weight_t.options());
-    save_var = at::empty({num_features}, weight_t.options());
-
     auto op = CUDNN_BATCHNORM_OPS_BN;
     size_t workspace_size;
     AT_CUDNN_CHECK(cudnnGetBatchNormalizationForwardTrainingExWorkspaceSize(
@@ -238,9 +252,6 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> cudnn_batch_norm(
         reserve_size));
   } else {
     reserve = at::empty({0}, input->options().dtype(kByte));
-    // This keeps a consistent output with native_batch_norm
-    save_mean = at::empty({0}, weight_t.options());
-    save_var = at::empty({0}, weight_t.options());
     AT_CUDNN_CHECK(cudnnBatchNormalizationForwardInference(
         handle,
         mode,
@@ -261,8 +272,46 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> cudnn_batch_norm(
   // save_mean and save_var can be undefined
   // If this causes problems, we can initialize them to empty tensors
   // of the correct type
-  return std::tuple<Tensor, Tensor, Tensor, Tensor>{
+  return std::tuple<Tensor&, Tensor&, Tensor&, Tensor&>{
       output_t, save_mean, save_var, reserve};
+}
+
+std::tuple<Tensor, Tensor, Tensor, Tensor> cudnn_batch_norm(
+    const Tensor& input_t,
+    const Tensor& weight_t,
+    const std::optional<Tensor>& bias_t_opt,
+    const std::optional<Tensor>& running_mean_t_opt,
+    const std::optional<Tensor>& running_var_t_opt,
+    bool training,
+    double exponential_average_factor,
+    double epsilon) {
+  auto output_t = at::empty_like(
+      input_t, input_t.options(), input_t.suggest_memory_format());
+  Tensor save_mean, save_var, reserve;
+
+  if (training) {
+    int64_t num_features = input_t.size(1);
+    save_mean = at::empty({num_features}, weight_t.options());
+    save_var = at::empty({num_features}, weight_t.options());
+  } else {
+    // This keeps a consistent output with native_batch_norm
+    save_mean = at::empty({0}, weight_t.options());
+    save_var = at::empty({0}, weight_t.options());
+  }
+
+  return cudnn_batch_norm_out(
+      input_t,
+      weight_t,
+      bias_t_opt,
+      running_mean_t_opt,
+      running_var_t_opt,
+      training,
+      exponential_average_factor,
+      epsilon,
+      output_t,
+      save_mean,
+      save_var,
+      reserve);
 }
 
 // NB: CuDNN only implements the backward algorithm for batchnorm
@@ -274,17 +323,15 @@ std::tuple<Tensor, Tensor, Tensor> cudnn_batch_norm_backward(
     const Tensor& weight_t,
     // Unused: but we require them to be passed so that double backwards
     // has access
-    const c10::optional<Tensor>& running_mean_opt,
-    const c10::optional<Tensor>& running_var_opt,
-    const c10::optional<Tensor>& save_mean_t_opt,
-    const c10::optional<Tensor>& save_var_t_opt,
+    const std::optional<Tensor>& running_mean_opt,
+    const std::optional<Tensor>& running_var_opt,
+    const std::optional<Tensor>& save_mean_t_opt,
+    const std::optional<Tensor>& save_var_t_opt,
     double epsilon,
     const Tensor& reserveSpace) {
   // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& save_mean_t =
-      c10::value_or_else(save_mean_t_opt, [] { return Tensor(); });
-  const Tensor& save_var_t =
-      c10::value_or_else(save_var_t_opt, [] { return Tensor(); });
+  const Tensor& save_mean_t = save_mean_t_opt.value_or(Tensor());
+  const Tensor& save_var_t = save_var_t_opt.value_or(Tensor());
 
   // TODO: Is it worth it to have a contiguous call or maybe we should go with
   // whatever format is given here.
@@ -394,7 +441,6 @@ std::tuple<Tensor, Tensor, Tensor> cudnn_batch_norm_backward(
       grad_input_t, grad_weight_t, grad_bias_t};
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native
 
 #endif

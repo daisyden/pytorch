@@ -1,6 +1,10 @@
+# mypy: allow-untyped-defs
+r"""Autograd anomaly mode."""
+
 import warnings
 
 import torch
+
 
 __all__ = ["detect_anomaly", "set_detect_anomaly"]
 
@@ -21,7 +25,6 @@ class detect_anomaly:
         will slow down your program execution.
 
     Example:
-
         >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_ANOMALY)
         >>> import torch
         >>> from torch import autograd
@@ -29,6 +32,7 @@ class detect_anomaly:
         ...     @staticmethod
         ...     def forward(ctx, inp):
         ...         return inp.clone()
+        ...
         ...     @staticmethod
         ...     def backward(ctx, gO):
         ...         # Error during the backward pass

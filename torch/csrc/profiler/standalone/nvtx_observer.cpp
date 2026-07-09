@@ -3,9 +3,7 @@
 #include <torch/csrc/profiler/stubs/base.h>
 #include <torch/csrc/profiler/util.h>
 
-namespace torch {
-namespace profiler {
-namespace impl {
+namespace torch::profiler::impl {
 
 struct NVTXThreadLocalState : ProfilerStateBase {
   explicit NVTXThreadLocalState(const ProfilerConfig& config)
@@ -22,11 +20,15 @@ struct NVTXThreadLocalState : ProfilerStateBase {
     return ActiveProfilerType::NVTX;
   }
 
-  void reportMemoryUsage(void*, int64_t, size_t, size_t, c10::Device) override {
-  }
+  void reportMemoryUsage(
+      void* /*ptr*/,
+      int64_t /*alloc_size*/,
+      size_t /*total_allocated*/,
+      size_t /*total_reserved*/,
+      c10::Device /*device*/) override {}
 
   static NVTXThreadLocalState* getTLS() {
-    auto tls = ProfilerStateBase::get(/*global=*/false);
+    ProfilerStateBase* tls = ProfilerStateBase::getTLS();
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
         tls == nullptr || tls->profilerType() == ActiveProfilerType::NVTX);
     return static_cast<NVTXThreadLocalState*>(tls);
@@ -126,7 +128,8 @@ static void updateOutputTensorTracker(const at::RecordFunction& fn) {
 }
 
 template <bool report_input_shapes>
-std::unique_ptr<at::ObserverContext> enterNVTX(const at::RecordFunction& fn) {
+static std::unique_ptr<at::ObserverContext> enterNVTX(
+    const at::RecordFunction& fn) {
   if (NVTXThreadLocalState::getTLS() != nullptr) {
     auto input_op_ids = getInputTensorOpIds(fn);
     torch::profiler::impl::cudaStubs()->rangePush(
@@ -174,6 +177,4 @@ void pushNVTXCallbacks(
   state_ptr->setCallbackHandle(handle);
 }
 
-} // namespace impl
-} // namespace profiler
-} // namespace torch
+} // namespace torch::profiler::impl

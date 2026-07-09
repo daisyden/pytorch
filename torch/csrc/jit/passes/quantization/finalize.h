@@ -4,8 +4,7 @@
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/passes/quantization/quantization_type.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 /** \brief Backend specific pass to fuse dequantize - op - quantize calls
  * as quantized_op calls.
@@ -33,7 +32,7 @@ TORCH_API void QuantFusion(
  * to fold the packed weight as an attribute of the module, in order to reduce
  * the cost of packing the weight on the fly in quantized models.
  *
- *  Each quantized op has it's corresponding prepack/unpack function,
+ *  Each quantized op has its corresponding prepack/unpack function,
  *  right now, we only need to do prepack/unpack for quantized::linear
  * and quantized::conv2d.
  */
@@ -59,5 +58,4 @@ TORCH_API Module FinalizeOnDevicePTQ(
     Module& module,
     QuantType quant_type,
     const std::string& method_name);
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

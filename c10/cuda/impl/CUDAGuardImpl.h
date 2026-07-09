@@ -4,6 +4,7 @@
 #include <c10/core/impl/GPUTrace.h>
 #include <c10/macros/Macros.h>
 #include <c10/util/Exception.h>
+#include <c10/util/ScopeExit.h>
 
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAException.h>
@@ -14,9 +15,9 @@
 #include <c10/core/DeviceType.h>
 #include <c10/core/Stream.h>
 #include <c10/core/impl/PyInterpreter.h>
-#include <c10/util/Optional.h>
 #include <cuda_runtime_api.h>
 #include <cstdint>
+#include <optional>
 
 namespace c10::cuda::impl {
 
@@ -25,13 +26,16 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
 
   CUDAGuardImpl() = default;
   explicit CUDAGuardImpl(DeviceType t) {
-    TORCH_INTERNAL_ASSERT(t == DeviceType::CUDA);
+    TORCH_CHECK(
+        t == DeviceType::CUDA,
+        "CUDAGuardImpl initialized with non-CUDA DeviceType: ",
+        t);
   }
   DeviceType type() const override {
     return DeviceType::CUDA;
   }
   Device exchangeDevice(Device d) const override {
-    TORCH_INTERNAL_ASSERT(d.is_cuda());
+    TORCH_CHECK(d.is_cuda(), "Expected a CUDA device, but got ", d);
     auto old_device_index = c10::cuda::ExchangeDevice(d.index());
     return Device(DeviceType::CUDA, old_device_index);
   }
@@ -40,23 +44,23 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     C10_CUDA_CHECK(c10::cuda::GetDevice(&device));
     return Device(DeviceType::CUDA, device);
   }
-  c10::optional<Device> uncheckedGetDevice() const noexcept {
+  std::optional<Device> uncheckedGetDevice() const noexcept {
     DeviceIndex device{-1};
     const auto err = C10_CUDA_ERROR_HANDLED(c10::cuda::GetDevice(&device));
     C10_CUDA_CHECK_WARN(err);
     if (err != cudaSuccess) {
-      return c10::nullopt;
+      return std::nullopt;
     }
     return Device(DeviceType::CUDA, device);
   }
   void setDevice(Device d) const override {
-    TORCH_INTERNAL_ASSERT(d.is_cuda());
+    TORCH_CHECK(d.is_cuda(), "Expected a CUDA device, but got ", d);
     C10_CUDA_CHECK(c10::cuda::SetDevice(d.index()));
   }
   void uncheckedSetDevice(Device d) const noexcept override {
     C10_CUDA_CHECK_WARN(c10::cuda::MaybeSetDevice(d.index()));
   }
-  Stream getStream(Device d) const noexcept override {
+  Stream getStream(Device d) const override {
     return getCurrentCUDAStream(d.index()).unwrap();
   }
   Stream getDefaultStream(Device d) const override {
@@ -70,11 +74,15 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     return getStreamFromPool(isHighPriority, d.index());
   }
   // NB: These do NOT set the current device
-  Stream exchangeStream(Stream s) const noexcept override {
+  Stream exchangeStream(Stream s) const override {
     CUDAStream cs(s);
     auto old_stream = getCurrentCUDAStream(s.device().index());
     setCurrentCUDAStream(cs);
     return old_stream.unwrap();
+  }
+  void* getStreamNativeHandle(const Stream s) const override {
+    CUDAStream stream{s};
+    return reinterpret_cast<void*>(stream.stream());
   }
   DeviceIndex deviceCount() const noexcept override {
     return device_count();
@@ -136,9 +144,14 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     cudaEvent_t cuda_event = static_cast<cudaEvent_t>(*event);
     CUDAStream cuda_stream{stream};
 
-    // Moves to stream's device to record
+    // Moves to stream's device to record, restoring the original device on
+    // scope exit (including the throwing path), mirroring CUDAEvent's
+    // destructor which restores via CUDAGuard.
     const auto orig_device = getDevice();
     setDevice(stream.device());
+    const auto restore_device = c10::make_scope_exit([&]() {
+      C10_CUDA_CHECK_WARN(c10::cuda::MaybeSetDevice(orig_device.index()));
+    });
 
     // Creates the event (lazily)
     if (!cuda_event)
@@ -153,9 +166,6 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
           reinterpret_cast<uintptr_t>(cuda_event),
           reinterpret_cast<uintptr_t>(cuda_stream.stream()));
     }
-
-    // Resets device
-    setDevice(orig_device);
   }
 
   void block(void* event, const Stream& stream) const override {
@@ -165,6 +175,9 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     CUDAStream cuda_stream{stream};
     const auto orig_device = getDevice();
     setDevice(stream.device());
+    const auto restore_device = c10::make_scope_exit([&]() {
+      C10_CUDA_CHECK_WARN(c10::cuda::MaybeSetDevice(orig_device.index()));
+    });
     C10_CUDA_CHECK(cudaStreamWaitEvent(
         cuda_stream,
         cuda_event,
@@ -176,7 +189,6 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
           reinterpret_cast<uintptr_t>(cuda_event),
           reinterpret_cast<uintptr_t>(cuda_stream.stream()));
     }
-    setDevice(orig_device);
   }
 
   // May be called from any device
@@ -184,6 +196,7 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     if (!event)
       return true;
     cudaEvent_t cuda_event = static_cast<cudaEvent_t>(event);
+    // Note: cudaEventQuery can be safely called from any device
     const cudaError_t err = C10_CUDA_ERROR_HANDLED(cudaEventQuery(cuda_event));
     if (err != cudaErrorNotReady) {
       C10_CUDA_CHECK(err);
@@ -205,10 +218,63 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     cuda_stream.synchronize();
   }
 
+  bool isStreamCapturing(const Stream& stream) const override {
+    CUDAStream cuda_stream{stream};
+    return cuda_stream.is_capturing();
+  }
+
+  void synchronizeEvent(void* event) const override {
+    if (!event)
+      return;
+    cudaEvent_t cuda_event = static_cast<cudaEvent_t>(event);
+    const c10::impl::PyInterpreter* interp = c10::impl::GPUTrace::get_trace();
+    if (C10_UNLIKELY(interp)) {
+      (*interp)->trace_gpu_event_synchronization(
+          c10::kCUDA, reinterpret_cast<uintptr_t>(cuda_event));
+    }
+    // Note: cudaEventSynchronize can be safely called from any device
+    C10_CUDA_CHECK(cudaEventSynchronize(cuda_event));
+  }
+
+  // Note: synchronizeDevice can be safely called from any device
+  void synchronizeDevice(const c10::DeviceIndex device_index) const override {
+    DeviceIndex orig_device{-1};
+    C10_CUDA_CHECK(c10::cuda::GetDevice(&orig_device));
+    C10_CUDA_CHECK(c10::cuda::SetDevice(device_index));
+    const auto restore_device = c10::make_scope_exit(
+        [&]() { C10_CUDA_CHECK_WARN(c10::cuda::MaybeSetDevice(orig_device)); });
+    const c10::impl::PyInterpreter* interp = c10::impl::GPUTrace::get_trace();
+    if (C10_UNLIKELY(interp)) {
+      (*interp)->trace_gpu_device_synchronization(c10::kCUDA);
+    }
+    C10_CUDA_CHECK(cudaDeviceSynchronize());
+  }
+
   void recordDataPtrOnStream(const c10::DataPtr& data_ptr, const Stream& stream)
       const override {
     CUDAStream cuda_stream{stream};
     CUDACachingAllocator::recordStream(data_ptr, cuda_stream);
+  }
+
+  double elapsedTime(void* event1, void* event2, const DeviceIndex device_index)
+      const override {
+    TORCH_CHECK(
+        event1 && event2,
+        "Both events must be recorded before calculating elapsed time.");
+    // Even though cudaEventElapsedTime can be safely called from any device, if
+    // the current device is not initialized, it will create a new cuda context,
+    // which will consume a lot of memory.
+    DeviceIndex orig_device{-1};
+    C10_CUDA_CHECK(c10::cuda::GetDevice(&orig_device));
+    C10_CUDA_CHECK(c10::cuda::SetDevice(device_index));
+    const auto restore_device = c10::make_scope_exit(
+        [&]() { C10_CUDA_CHECK_WARN(c10::cuda::MaybeSetDevice(orig_device)); });
+    cudaEvent_t cuda_event1 = static_cast<cudaEvent_t>(event1);
+    cudaEvent_t cuda_event2 = static_cast<cudaEvent_t>(event2);
+    float time_ms = 0;
+    // raise cudaErrorNotReady if either event is recorded but not yet completed
+    C10_CUDA_CHECK(cudaEventElapsedTime(&time_ms, cuda_event1, cuda_event2));
+    return static_cast<double>(time_ms);
   }
 };
 

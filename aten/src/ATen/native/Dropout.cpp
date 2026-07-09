@@ -1,6 +1,5 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/core/Tensor.h>
-#include <ATen/NamedTensorUtils.h>
 #include <ATen/TensorOperators.h>
 #include <c10/util/irange.h>
 
@@ -25,7 +24,7 @@ namespace at::native {
 namespace {
 
 template<bool inplace>
-using Ctype = typename std::conditional<inplace, Tensor&, Tensor>::type;
+using Ctype = typename std::conditional_t<inplace, Tensor&, Tensor>;
 
 Tensor make_feature_noise(const Tensor& input) {
   auto input_sizes = input.sym_sizes();
@@ -34,7 +33,7 @@ Tensor make_feature_noise(const Tensor& input) {
   sizes.reserve(input.dim());
   sizes.push_back(input_sizes[0]);
   sizes.push_back(input_sizes[1]);
-  for (C10_UNUSED const auto i : c10::irange(2, input.dim())) {
+  for ([[maybe_unused]] const auto i : c10::irange(2, input.dim())) {
     sizes.push_back(1);
   }
   return input.new_empty_symint(sizes);
@@ -70,7 +69,7 @@ Ctype<inplace> _dropout_impl(T& input, double p, bool train) {
   }
 
   at::Tensor b; // used for alpha_dropout only
-  auto noise = feature_dropout ? make_feature_noise(input) : at::empty_like(input, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
+  auto noise = feature_dropout ? make_feature_noise(input) : at::empty_like(input);
   noise.bernoulli_(1 - p);
   if (alpha_dropout) {
     constexpr double alpha = 1.7580993408473766;
@@ -102,7 +101,7 @@ ALIAS_SPECIALIZATION(_feature_alpha_dropout, true,  true )
 } // anonymous namespace
 
 std::tuple<Tensor,Tensor>
-native_dropout_cpu(const Tensor& input, double p, c10::optional<bool> train) {
+native_dropout_cpu(const Tensor& input, double p, std::optional<bool> train) {
   if (input.numel() == 0) {
     return std::make_tuple(input, at::empty_like(input, input.options()));
   }
@@ -121,7 +120,7 @@ native_dropout_cpu(const Tensor& input, double p, c10::optional<bool> train) {
     mask = at::ones_like(input, input.options().dtype(c10::CppTypeToScalarType<bool>::value));
     output = input.clone();
   }
-  return std::make_tuple(output, mask);
+  return std::make_tuple(std::move(output), std::move(mask));
 }
 
 Tensor native_dropout_backward(const Tensor& grad, const Tensor& mask, double scale) {
@@ -131,7 +130,6 @@ Tensor native_dropout_backward(const Tensor& grad, const Tensor& mask, double sc
 
 Tensor dropout(const Tensor& input, double p, bool train) {
   auto result = [&]() {
-    NoNamesGuard guard;
     // TODO: we can remove this is_nested() code smell in the future
     //       if we find a way to support _dropout for nested tensor
     //       e.g. make it an op (at::_dropout) to use dispatcher?
@@ -140,7 +138,6 @@ Tensor dropout(const Tensor& input, double p, bool train) {
     }
     return _dropout<false>(input, p, train);
   }();
-  namedinference::propagate_names(result, input);
   return result;
 }
 

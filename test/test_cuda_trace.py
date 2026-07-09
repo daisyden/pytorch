@@ -8,17 +8,19 @@ import torch
 import torch.cuda._gpu_trace as gpu_trace
 from torch.testing._internal.common_utils import NoTest, run_tests, TEST_CUDA, TestCase
 
+
 # NOTE: Each test needs to be run in a brand new process, to reset the registered hooks
 # and make sure the CUDA streams are initialized for each test that uses them.
 
 if not TEST_CUDA:
     print("CUDA not available, skipping tests", file=sys.stderr)
-    TestCase = NoTest  # noqa: F811
+    TestCase = NoTest
 
 
 @torch.testing._internal.common_utils.markDynamoStrictTest
 class TestCudaTrace(TestCase):
     def setUp(self):
+        super().setUp()
         torch._C._activate_gpu_trace()
         self.mock = unittest.mock.MagicMock()
 
@@ -78,7 +80,7 @@ class TestCudaTrace(TestCase):
         if torch.version.hip:
             user_stream = torch.cuda.Stream()
             with torch.cuda.stream(user_stream):
-                tensor = torch.ones(5, device="cuda")
+                torch.ones(5, device="cuda")
         else:
             torch.cuda.Stream()
 

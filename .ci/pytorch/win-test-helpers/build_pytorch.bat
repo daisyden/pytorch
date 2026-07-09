@@ -10,7 +10,7 @@ set PATH=C:\Program Files\CMake\bin;C:\Program Files\7-Zip;C:\ProgramData\chocol
 :: able to see what our cl.exe commands are (since you can actually
 :: just copy-paste them into a local Windows setup to just rebuild a
 :: single file.)
-:: log sizes are too long, but leaving this here incase someone wants to use it locally
+:: log sizes are too long, but leaving this here in case someone wants to use it locally
 :: set CMAKE_VERBOSE_MAKEFILE=1
 
 
@@ -24,13 +24,27 @@ call %INSTALLER_DIR%\install_sccache.bat
 if errorlevel 1 goto fail
 if not errorlevel 0 goto fail
 
+if "%USE_XPU%"=="1" (
+  :: Install xpu support packages
+  set CUDA_VERSION=xpu
+  call %SCRIPT_HELPERS_DIR%\..\windows\internal\xpu_install.bat
+  if errorlevel 1 exit /b 1
+)
+
 :: Miniconda has been installed as part of the Windows AMI with all the dependencies.
 :: We just need to activate it here
 call %INSTALLER_DIR%\activate_miniconda3.bat
 if errorlevel 1 goto fail
 if not errorlevel 0 goto fail
 
-call pip install mkl-include==2021.4.0 mkl-devel==2021.4.0
+:: Update CMake
+:: TODO: Investigate why this helps MKL detection, even when CMake from choco is not used
+call choco upgrade -y cmake --no-progress --installargs 'ADD_CMAKE_TO_PATH=System' --apply-install-arguments-to-dependencies --version=3.27.9
+if errorlevel 1 goto fail
+if not errorlevel 0 goto fail
+
+:: TODO: Move to .ci/docker/requirements-ci.txt
+call pip install mkl==2024.2.0 mkl-static==2024.2.0 mkl-include==2024.2.0
 if errorlevel 1 goto fail
 if not errorlevel 0 goto fail
 
@@ -43,6 +57,18 @@ if "%VC_VERSION%" == "" (
 )
 if errorlevel 1 goto fail
 if not errorlevel 0 goto fail
+
+if "%USE_XPU%"=="1" (
+  :: Activate xpu environment - VS env is required for xpu
+  call "C:\Program Files (x86)\Intel\oneAPI\compiler\latest\env\vars.bat"
+  call "C:\Program Files (x86)\Intel\oneAPI\ocloc\latest\env\vars.bat"
+  if errorlevel 1 exit /b 1
+  :: Reduce build time
+  SET TORCH_XPU_ARCH_LIST=bmg
+  :: Re-setup python env for build
+  call pip install -r requirements.txt
+)
+
 @echo on
 popd
 
@@ -65,19 +91,12 @@ set CUDA_PATH_V%VERSION_SUFFIX%=%CUDA_PATH%
 set CUDNN_LIB_DIR=%CUDA_PATH%\lib\x64
 set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
 set CUDNN_ROOT_DIR=%CUDA_PATH%
-set NVTOOLSEXT_PATH=C:\Program Files\NVIDIA Corporation\NvToolsExt
-set PATH=%CUDA_PATH%\bin;%CUDA_PATH%\libnvvp;%PATH%
-
-set CUDNN_LIB_DIR=%CUDA_PATH%\lib\x64
-set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
-set CUDNN_ROOT_DIR=%CUDA_PATH%
-set NVTOOLSEXT_PATH=C:\Program Files\NVIDIA Corporation\NvToolsExt
 set PATH=%CUDA_PATH%\bin;%CUDA_PATH%\libnvvp;%PATH%
 
 :cuda_build_end
 
 set DISTUTILS_USE_SDK=1
-set PATH=%TMP_DIR_WIN%\bin;%PATH%
+set PATH=%TMP_DIR_WIN%\bin;C:\Program Files\CMake\bin;%PATH%
 
 :: The latest Windows CUDA test is running on AWS G5 runner with A10G GPU
 if "%TORCH_CUDA_ARCH_LIST%" == "" set TORCH_CUDA_ARCH_LIST=8.6
@@ -113,14 +132,14 @@ if "%USE_CUDA%"=="1" (
 :: Print all existing environment variable for debugging
 set
 
-python setup.py bdist_wheel
+python -m build --wheel --no-isolation
 if errorlevel 1 goto fail
 if not errorlevel 0 goto fail
 sccache --show-stats
 python -c "import os, glob; os.system('python -mpip install --no-index --no-deps ' + glob.glob('dist/*.whl')[0])"
 (
   if "%BUILD_ENVIRONMENT%"=="" (
-    echo NOTE: To run `import torch`, please make sure to activate the conda environment by running `call %CONDA_PARENT_DIR%\Miniconda3\Scripts\activate.bat %CONDA_PARENT_DIR%\Miniconda3` in Command Prompt before running Git Bash.
+    echo NOTE: To run `import torch`, please make sure to activate the conda environment by running `call %CONDA_ROOT_DIR%\Scripts\activate.bat %CONDA_ROOT_DIR%\envs\py_tmp` in Command Prompt before running Git Bash.
   ) else (
     copy /Y "dist\*.whl" "%PYTORCH_FINAL_PACKAGE_DIR%"
 

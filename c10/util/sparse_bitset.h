@@ -434,6 +434,7 @@ class SparseBitVector {
       : Elements(RHS.Elements), CurrElementIter(Elements.begin()) {}
   SparseBitVector(SparseBitVector&& RHS) noexcept
       : Elements(std::move(RHS.Elements)), CurrElementIter(Elements.begin()) {}
+  ~SparseBitVector() = default;
 
   // Clear.
   void clear() {
@@ -876,7 +877,7 @@ std::ostream& operator<<(
     std::ostream& stream,
     const SparseBitVector<ElementSize>& vec) {
   bool first = true;
-  stream << "{";
+  stream << '{';
   for (auto el : vec) {
     if (first) {
       first = false;
@@ -885,7 +886,7 @@ std::ostream& operator<<(
     }
     stream << el;
   }
-  stream << "}";
+  stream << '}';
   return stream;
 }
 

@@ -41,7 +41,7 @@ const Tensor& input,
     bool bidirectional,
     bool batch_first,
     bool train) {
-      AT_ERROR("mkldnn_rnn_layer: ATen not compiled with MKLDNN support");
+      TORCH_CHECK(false, "mkldnn_rnn_layer: ATen not compiled with MKLDNN support");
   }
 
 std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_layer_backward(
@@ -55,9 +55,9 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_la
     const Tensor& output,
     const Tensor& hy_,
     const Tensor& cy_,
-    const c10::optional<Tensor>& grad_output_r_opt,
-    const c10::optional<Tensor>& grad_hy_r_opt,
-    const c10::optional<Tensor>& grad_cy_r_opt,
+    const std::optional<Tensor>& grad_output_r_opt,
+    const std::optional<Tensor>& grad_hy_r_opt,
+    const std::optional<Tensor>& grad_cy_r_opt,
     bool reverse,
     int64_t mode,
     int64_t hidden_size,
@@ -68,10 +68,10 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_la
     at::IntArrayRef batch_sizes,
     bool batch_first,
     const at::Tensor& workspace) {
-      AT_ERROR("mkldnn_rnn_layer_backward: ATen not compiled with MKLDNN support");
+      TORCH_CHECK(false, "mkldnn_rnn_layer_backward: ATen not compiled with MKLDNN support");
     }
 
-REGISTER_NO_CPU_DISPATCH(lstm_mkldnn_stub);
+REGISTER_NO_CPU_DISPATCH(lstm_mkldnn_stub)
 
 } // namespace at::native
 
@@ -168,15 +168,8 @@ struct RNNParams {
   }
 };
 
-static std::vector<int64_t> _hidden_size(const RNNParams& rnn) {
-  return {rnn.num_layers * rnn.num_directions, rnn.mini_batch, rnn.hidden_size};
-}
-
-template<bool is_single_direction>
-std::vector<int64_t> _output_size(const RNNParams& rnn) {
-  auto output_channels = is_single_direction ? rnn.hidden_size
-                                             : rnn.hidden_size * rnn.num_directions;
-  return {rnn.seq_length, rnn.mini_batch, output_channels};
+static std::vector<int64_t> _output_size(const RNNParams& rnn) {
+  return {rnn.seq_length, rnn.mini_batch, rnn.hidden_size};
 }
 
 // MKLDNN GRU gate order is different from PyTorch's which requires gates shuffle
@@ -243,7 +236,7 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_layer(const Tensor& input,
       batch_first,
       train);
 
-  auto output_size = _output_size</*is_single_direction*/ true>(rnn);
+  auto output_size = _output_size(rnn);
   auto output = at::empty(output_size, input.options());
 
   auto hy_ = at::empty(hx_.sizes(), hx_.options());
@@ -287,11 +280,12 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_layer(const Tensor& input,
         pd.workspace_desc(), workspace.template data_ptr<uint8_t>());
     ideep::lstm_forward_training::compute(
         pd, x, hx, cx, w1_, w2_, b, mkldnn_workspace, y, hy, cy, reverse, ideep::prop_kind::forward_training);
-    return std::make_tuple(output, hy_, cy_, workspace);
+    return std::make_tuple(
+        std::move(output), std::move(hy_), std::move(cy_), std::move(workspace));
   } else {
     ideep::lstm_forward_inference::compute(
         x, hx, cx, w1_, w2_, b, y, hy, cy, reverse, ideep::prop_kind::forward_inference);
-    return std::make_tuple(output, hy_, cy_, Tensor());
+    return std::make_tuple(std::move(output), std::move(hy_), std::move(cy_), Tensor());
   }
 }
 
@@ -306,9 +300,9 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_la
     const Tensor& output,
     const Tensor& hy_,
     const Tensor& cy_,
-    const c10::optional<Tensor>& grad_output_r_opt,
-    const c10::optional<Tensor>& grad_hy_r_opt,
-    const c10::optional<Tensor>& grad_cy_r_opt,
+    const std::optional<Tensor>& grad_output_r_opt,
+    const std::optional<Tensor>& grad_hy_r_opt,
+    const std::optional<Tensor>& grad_cy_r_opt,
     bool reverse,
     int64_t mode,
     int64_t hidden_size,
@@ -319,9 +313,9 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_la
     at::IntArrayRef batch_sizes,
     bool batch_first,
     const at::Tensor& workspace) {
-  const Tensor& grad_output_r = c10::value_or_else(grad_output_r_opt, [] {return Tensor();});
-  const Tensor& grad_hy_r = c10::value_or_else(grad_hy_r_opt, [] {return Tensor();});
-  const Tensor& grad_cy_r = c10::value_or_else(grad_cy_r_opt, [] {return Tensor();});
+  const Tensor& grad_output_r = grad_output_r_opt.value_or(Tensor());
+  const Tensor& grad_hy_r = grad_hy_r_opt.value_or(Tensor());
+  const Tensor& grad_cy_r = grad_cy_r_opt.value_or(Tensor());
   if (!grad_output_r.defined() && !grad_hy_r.defined() && !grad_cy_r.defined()) {
       return std::make_tuple(Tensor(), Tensor(), Tensor(), Tensor(), Tensor(), Tensor(), Tensor());
   }
@@ -337,7 +331,7 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_la
       bidirectional,
       batch_first,
       train);
-  auto output_size = _output_size</*is_single_direction*/ true>(rnn);
+  auto output_size = _output_size(rnn);
 
   auto weight_ih = _shuffle_weight(weight0, rnn.mode);
   auto weight_hh = _shuffle_weight(weight1, rnn.mode);
@@ -436,14 +430,14 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> mkldnn_rnn_la
       forward_hint.workspace_desc(), workspace.template data_ptr<uint8_t>());
   ideep::lstm_backward::compute(forward_hint, x, hx, cx, w1, w2, b, y, hy, cy, diff_y, diff_hy, diff_cy, mkldnn_workspace, diff_x, diff_hx, diff_cx, diff_w1, diff_w2, diff_b, reverse);
   auto diff_b2_ = at::clone(diff_b_);
-  return std::make_tuple(diff_x_, diff_w1_, diff_w2_, diff_b_, diff_b2_, diff_hx_, diff_cx_);
+  return std::make_tuple(std::move(diff_x_), std::move(diff_w1_), std::move(diff_w2_), std::move(diff_b_), std::move(diff_b2_), std::move(diff_hx_), std::move(diff_cx_));
 }
 
 // MKLDNN RNN integration notes:
 // I. Memory Formats
 //   a. mkldnn will use plain formats for input, hx/cx, output, hy/cy
 //      and possibly use blocked formats for weights depending shape info.
-//   b. All mkldnn memorys are created (in plain format) as views on ATen tensor,
+//   b. All mkldnn memories are created (in plain format) as views on ATen tensor,
 //      the weight reorder(if any) is handed automatically inside ideep (mkldnn bridge)
 //
 // II. MKLDNN Primitive Mapping
@@ -461,7 +455,7 @@ static std::tuple<Tensor, Tensor, Tensor> mkldnn_rnn(
     int64_t mode, int64_t hidden_size,
     int64_t num_layers, bool has_biases, bool batch_first, double dropout_p,
     bool train, bool bidirectional, IntArrayRef batch_sizes) {
-  TORCH_CHECK(batch_sizes.size() == 0, "mkldnn_rnn doesn't support packed input");
+  TORCH_CHECK(batch_sizes.empty(), "mkldnn_rnn doesn't support packed input");
   if (static_cast<ideep::rnn_kind>(mode) != ideep::rnn_kind::LSTM) {
     TORCH_CHECK(!cx_.defined(), "mkldnn_rnn: illegal defined cx for non-LSTM RNN");
   }
@@ -491,13 +485,36 @@ static std::tuple<Tensor, Tensor, Tensor> mkldnn_rnn(
       auto layer_cx = cx[index];
       auto reverse = (direction > 0);
       // bias won't be packed
-      auto outputs = at::mkldnn_rnn_layer(layer_input, layer_weights[0], layer_weights[1],
-                                        has_biases ? layer_weights[2] : at::zeros(layer_weights[0].sizes(), layer_weights[0].options().layout(at::Layout::Strided)),
-          has_biases ? layer_weights[3] : at::zeros(layer_weights[1].sizes(), layer_weights[1].options().layout(at::Layout::Strided)), layer_hx,
-          layer_cx, reverse, batch_sizes, mode, hidden_size, num_layers, has_biases, bidirectional, batch_first, train);
-      layer_output[direction] = std::get<0>(outputs);
-      layer_hy[index] = std::get<1>(outputs);
-      layer_cy[index] = std::get<2>(outputs);
+      std::tie(
+          layer_output[direction],
+          layer_hy[index],
+          layer_cy[index],
+          std::ignore) =
+          at::mkldnn_rnn_layer(
+              layer_input,
+              layer_weights[0],
+              layer_weights[1],
+              has_biases
+                  ? layer_weights[2]
+                  : at::zeros(
+                        layer_weights[0].sizes(),
+                        layer_weights[0].options().layout(at::Layout::Strided)),
+              has_biases
+                  ? layer_weights[3]
+                  : at::zeros(
+                        layer_weights[1].sizes(),
+                        layer_weights[1].options().layout(at::Layout::Strided)),
+              layer_hx,
+              layer_cx,
+              reverse,
+              batch_sizes,
+              mode,
+              hidden_size,
+              num_layers,
+              has_biases,
+              bidirectional,
+              batch_first,
+              train);
     }
     layer_input = num_directions == 1 ? layer_output[0]
                                       : at::cat(layer_output, /*output_channels*/-1);
@@ -511,7 +528,7 @@ static std::tuple<Tensor, Tensor, Tensor> mkldnn_rnn(
   if (batch_first) {
     output = output.transpose(0, 1);
   }
-  return std::make_tuple(output, hy, cy);
+  return std::make_tuple(std::move(output), std::move(hy), std::move(cy));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -527,8 +544,7 @@ std::tuple<Tensor, Tensor> unpack_hidden(const std::tuple<Tensor, Tensor>& hidde
 
 template<typename hidden_type>
 hidden_type pack_hidden(const Tensor& hx, const Tensor& cx) {
-  static_assert(std::is_same<hidden_type, void>::value, "pack_hidden not implemented for this type");
-  AT_ERROR("NOT IMPLEMENTED");
+  static_assert(false && sizeof(hidden_type), "pack_hidden not implemented for this type");
 }
 
 template<>
@@ -558,13 +574,12 @@ void lstm_mkldnn(Tensor& output, Tensor& hy, Tensor& cy,
     int64_t num_layers, double dropout_p, bool train, bool bidirectional, bool batch_first) {
   auto result = mkldnn_impl(input, std::make_tuple(hx[0], hx[1]), params, has_biases,
       ideep::rnn_kind::LSTM, num_layers, dropout_p, train, bidirectional, batch_first);
-  output = result.first;
-  hy = std::get<0>(result.second);
-  cy = std::get<1>(result.second);
+  output = std::move(result.first);
+  std::tie(hy, cy) = std::move(result.second);
 }
 } // anonymous namespace
 
-REGISTER_ALL_CPU_DISPATCH(lstm_mkldnn_stub, &lstm_mkldnn);
+REGISTER_ALL_CPU_DISPATCH(lstm_mkldnn_stub, &lstm_mkldnn)
 
 } // namespace at::native
 

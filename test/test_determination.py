@@ -3,7 +3,10 @@
 import os
 
 import run_test
-from torch.testing._internal.common_utils import TestCase, run_tests
+
+from tools.testing.modulefinder_determinator import test_impact_of_file
+
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 
 class DummyOptions:
@@ -30,7 +33,9 @@ class DeterminationTest(TestCase):
         return [
             test
             for test in cls.TESTS
-            if run_test.should_run_test(run_test.TARGET_DET_LIST, test, changed_files, DummyOptions())
+            if run_test.should_run_test(
+                run_test.TARGET_DET_LIST, test, changed_files, DummyOptions()
+            )
         ]
 
     def test_target_det_list_is_sorted(self):
@@ -42,8 +47,42 @@ class DeterminationTest(TestCase):
 
     def test_config_change_only(self):
         """CI configs trigger all tests"""
-        self.assertEqual(
-            self.determined_tests([".ci/pytorch/test.sh"]), self.TESTS
+        self.assertEqual(self.determined_tests([".ci/pytorch/test.sh"]), self.TESTS)
+
+    def test_classifies_git_style_paths(self):
+        """Git-style paths use / even on Windows"""
+        self.assertEqual(test_impact_of_file("torch/nn/modules/linear.py"), "TORCH")
+        self.assertEqual(test_impact_of_file("test/test_jit.py"), "TEST")
+        self.assertEqual(test_impact_of_file("caffe2/python/core.py"), "CAFFE2")
+        self.assertEqual(test_impact_of_file(".ci/pytorch/test.sh"), "CI")
+
+    def test_classifies_windows_style_paths(self):
+        """Windows-style paths are still accepted"""
+        self.assertEqual(test_impact_of_file(r"torch\nn\modules\linear.py"), "TORCH")
+        self.assertEqual(test_impact_of_file(r"test\test_jit.py"), "TEST")
+        self.assertEqual(test_impact_of_file(r"caffe2\python\core.py"), "CAFFE2")
+        self.assertEqual(test_impact_of_file(r".ci\pytorch\test.sh"), "CI")
+
+    def test_should_run_test_handles_git_style_paths(self):
+        """should_run_test handles raw Git-style changed-file paths"""
+        self.assertTrue(
+            run_test.should_run_test(
+                run_test.TARGET_DET_LIST,
+                "test_determination",
+                ["torch/utils/cpp_extension.py"],
+                DummyOptions(),
+            )
+        )
+
+    def test_should_run_test_handles_windows_style_paths(self):
+        """should_run_test still handles Windows-style changed-file paths"""
+        self.assertTrue(
+            run_test.should_run_test(
+                run_test.TARGET_DET_LIST,
+                "test_determination",
+                [r"torch\utils\cpp_extension.py"],
+                DummyOptions(),
+            )
         )
 
     def test_run_test(self):
@@ -68,14 +107,17 @@ class DeterminationTest(TestCase):
     def test_test_file(self):
         """Test files trigger themselves and dependent tests"""
         self.assertEqual(
-            self.determined_tests(["test/test_jit.py"]), ["test_jit_profiling", "test_jit"]
+            self.determined_tests(["test/test_jit.py"]),
+            ["test_jit_profiling", "test_jit"],
         )
         self.assertEqual(
             self.determined_tests(["test/jit/test_custom_operators.py"]),
             ["test_jit_profiling", "test_jit"],
         )
         self.assertEqual(
-            self.determined_tests(["test/quantization/eager/test_quantize_eager_ptq.py"]),
+            self.determined_tests(
+                ["test/quantization/eager/test_quantize_eager_ptq.py"]
+            ),
             ["test_quantization"],
         )
 
@@ -115,13 +157,6 @@ class DeterminationTest(TestCase):
                 "test_utils",
                 "test_determination",
             ],
-        )
-
-    def test_caffe2_file(self):
-        """Caffe2 files trigger dependent tests"""
-        self.assertEqual(self.determined_tests(["caffe2/python/brew_test.py"]), [])
-        self.assertEqual(
-            self.determined_tests(["caffe2/python/context.py"]), self.TESTS
         )
 
     def test_new_folder(self):

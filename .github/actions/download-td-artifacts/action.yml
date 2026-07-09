@@ -11,14 +11,14 @@ runs:
   using: composite
   steps:
     - name: Download TD Artifacts from S3
-      if: ${{ !inputs.use-gha }}
+      if: inputs.use-gha == '' || inputs.use-gha == 'false'
       uses: seemethere/download-artifact-s3@v4
       with:
         name: td_results
 
     - name: Download TD Artifacts from GHA
-      if: inputs.use-gha
-      uses: actions/download-artifact@v3
+      if: inputs.use-gha != '' && inputs.use-gha != 'false'
+      uses: actions/download-artifact@v4
       with:
         name: td_results.json
 
@@ -26,4 +26,4 @@ runs:
       shell: bash
       run: |
         mkdir -p .additional_ci_files
-        mv td_results.json .additional_ci_files/td_results.json
+        mv td_results.json .additional_ci_files/td_results.json || true

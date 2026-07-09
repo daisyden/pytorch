@@ -1,20 +1,20 @@
 // This file defines OptionalArrayRef<T>, a class that has almost the same
-// exact functionality as c10::optional<ArrayRef<T>>, except that its
+// exact functionality as std::optional<ArrayRef<T>>, except that its
 // converting constructor fixes a dangling pointer issue.
 //
-// The implicit converting constructor of both c10::optional<ArrayRef<T>> and
+// The implicit converting constructor of both std::optional<ArrayRef<T>> and
 // std::optional<ArrayRef<T>> can cause the underlying ArrayRef<T> to store
 // a dangling pointer. OptionalArrayRef<T> prevents this by wrapping
-// a c10::optional<ArrayRef<T>> and fixing the constructor implementation.
+// a std::optional<ArrayRef<T>> and fixing the constructor implementation.
 //
 // See https://github.com/pytorch/pytorch/issues/63645 for more on this.
 
 #pragma once
 
 #include <c10/util/ArrayRef.h>
-#include <c10/util/Optional.h>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -27,16 +27,16 @@ class OptionalArrayRef final {
 
   constexpr OptionalArrayRef() noexcept = default;
 
-  constexpr OptionalArrayRef(nullopt_t) noexcept {}
+  constexpr OptionalArrayRef(std::nullopt_t /*unused*/) noexcept {}
 
   OptionalArrayRef(const OptionalArrayRef& other) = default;
 
   OptionalArrayRef(OptionalArrayRef&& other) noexcept = default;
 
-  constexpr OptionalArrayRef(const optional<ArrayRef<T>>& other) noexcept
+  constexpr OptionalArrayRef(const std::optional<ArrayRef<T>>& other) noexcept
       : wrapped_opt_array_ref(other) {}
 
-  constexpr OptionalArrayRef(optional<ArrayRef<T>>&& other) noexcept
+  constexpr OptionalArrayRef(std::optional<ArrayRef<T>>&& other) noexcept
       : wrapped_opt_array_ref(std::move(other)) {}
 
   constexpr OptionalArrayRef(const T& value) noexcept
@@ -44,6 +44,7 @@ class OptionalArrayRef final {
 
   template <
       typename U = ArrayRef<T>,
+      // NOLINTNEXTLINE(modernize-use-constraints)
       std::enable_if_t<
           !std::is_same_v<std::decay_t<U>, OptionalArrayRef> &&
               !std::is_same_v<std::decay_t<U>, std::in_place_t> &&
@@ -57,6 +58,7 @@ class OptionalArrayRef final {
 
   template <
       typename U = ArrayRef<T>,
+      // NOLINTNEXTLINE(modernize-use-constraints)
       std::enable_if_t<
           !std::is_same_v<std::decay_t<U>, OptionalArrayRef> &&
               !std::is_same_v<std::decay_t<U>, std::in_place_t> &&
@@ -89,8 +91,8 @@ class OptionalArrayRef final {
 
   // Assignment
 
-  constexpr OptionalArrayRef& operator=(nullopt_t) noexcept {
-    wrapped_opt_array_ref = c10::nullopt;
+  constexpr OptionalArrayRef& operator=(std::nullopt_t /*unused*/) noexcept {
+    wrapped_opt_array_ref = std::nullopt;
     return *this;
   }
 
@@ -99,19 +101,20 @@ class OptionalArrayRef final {
   OptionalArrayRef& operator=(OptionalArrayRef&& other) noexcept = default;
 
   constexpr OptionalArrayRef& operator=(
-      const optional<ArrayRef<T>>& other) noexcept {
+      const std::optional<ArrayRef<T>>& other) noexcept {
     wrapped_opt_array_ref = other;
     return *this;
   }
 
   constexpr OptionalArrayRef& operator=(
-      optional<ArrayRef<T>>&& other) noexcept {
+      std::optional<ArrayRef<T>>&& other) noexcept {
     wrapped_opt_array_ref = std::move(other);
     return *this;
   }
 
   template <
       typename U = ArrayRef<T>,
+      // NOLINTNEXTLINE(modernize-use-constraints)
       typename = std::enable_if_t<
           !std::is_same_v<std::decay_t<U>, OptionalArrayRef> &&
           std::is_constructible_v<ArrayRef<T>, U&&> &&
@@ -162,6 +165,7 @@ class OptionalArrayRef final {
   }
 
   constexpr const ArrayRef<T>& value() const& {
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     return wrapped_opt_array_ref.value();
   }
 
@@ -174,6 +178,7 @@ class OptionalArrayRef final {
   }
 
   template <typename U>
+  // NOLINTNEXTLINE(modernize-use-constraints)
   constexpr std::
       enable_if_t<std::is_convertible_v<U&&, ArrayRef<T>>, ArrayRef<T>>
       value_or(U&& default_value) const& {
@@ -181,6 +186,7 @@ class OptionalArrayRef final {
   }
 
   template <typename U>
+  // NOLINTNEXTLINE(modernize-use-constraints)
   constexpr std::
       enable_if_t<std::is_convertible_v<U&&, ArrayRef<T>>, ArrayRef<T>>
       value_or(U&& default_value) && {
@@ -198,6 +204,7 @@ class OptionalArrayRef final {
   }
 
   template <typename... Args>
+  // NOLINTNEXTLINE(modernize-use-constraints)
   constexpr std::
       enable_if_t<std::is_constructible_v<ArrayRef<T>, Args&&...>, ArrayRef<T>&>
       emplace(Args&&... args) noexcept(
@@ -212,25 +219,17 @@ class OptionalArrayRef final {
     return wrapped_opt_array_ref.emplace(il, std::forward<Args>(args)...);
   }
 
+  friend bool operator==(OptionalArrayRef a1, ArrayRef<T> other) {
+    if (!a1.has_value()) {
+      return false;
+    }
+    return a1.value() == other;
+  }
+
  private:
-  optional<ArrayRef<T>> wrapped_opt_array_ref;
+  std::optional<ArrayRef<T>> wrapped_opt_array_ref;
 };
 
 using OptionalIntArrayRef = OptionalArrayRef<int64_t>;
-
-inline bool operator==(
-    const OptionalIntArrayRef& a1,
-    const IntArrayRef& other) {
-  if (!a1.has_value()) {
-    return false;
-  }
-  return a1.value() == other;
-}
-
-inline bool operator==(
-    const c10::IntArrayRef& a1,
-    const c10::OptionalIntArrayRef& a2) {
-  return a2 == a1;
-}
 
 } // namespace c10

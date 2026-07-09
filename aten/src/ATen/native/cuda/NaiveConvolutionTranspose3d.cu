@@ -10,6 +10,7 @@
 
 #include <ATen/native/ConvUtils.h>
 #include <ATen/native/cuda/vol2col.cuh>
+#include <utility>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -106,7 +107,7 @@ static inline void slow_conv_transpose3d_shape_check(
       check_dim_size(bias, 1, 0, weight.size(1));
     }
   } else if (!weight_nullable) {
-    AT_ERROR("weight tensor is expected to be non-nullable");
+    TORCH_CHECK(false, "weight tensor is expected to be non-nullable");
   }
 
   int ndim = input.dim();
@@ -140,7 +141,7 @@ static inline void slow_conv_transpose3d_shape_check(
       (dilation_width * (kernel_width - 1) + 1) + output_padding_width;
 
   if (output_depth < 1 || output_width < 1 || output_height < 1) {
-    AT_ERROR(
+    TORCH_CHECK(false,
         "Given input size per channel: (",
         input_depth,
         " x ",
@@ -835,7 +836,7 @@ void slow_conv_transpose3d_acc_grad_parameters_cuda(
 
 Tensor& slow_conv_transpose3d_out_cuda(const Tensor& input,
     const Tensor& weight,
-    IntArrayRef kernel_size, const c10::optional<Tensor>& bias_opt,
+    IntArrayRef kernel_size, const std::optional<Tensor>& bias_opt,
     IntArrayRef stride,
     IntArrayRef padding,
     IntArrayRef output_padding,
@@ -862,7 +863,7 @@ Tensor& slow_conv_transpose3d_out_cuda(const Tensor& input,
 Tensor slow_conv_transpose3d_cuda(
     const Tensor& input,
     const Tensor& weight,
-    IntArrayRef kernel_size, const c10::optional<Tensor>& bias_opt,
+    IntArrayRef kernel_size, const std::optional<Tensor>& bias_opt,
     IntArrayRef stride,
     IntArrayRef padding,
     IntArrayRef output_padding,
@@ -1008,9 +1009,10 @@ std::tuple<Tensor, Tensor, Tensor> slow_conv_transpose3d_backward_cuda(
         1);
   }
 
-  return std::tuple<Tensor, Tensor, Tensor>(grad_input, grad_weight, grad_bias);
+  return std::tuple<Tensor, Tensor, Tensor>(
+      std::move(grad_input), std::move(grad_weight), std::move(grad_bias));
 }
 
-REGISTER_CUDA_DISPATCH(slow_conv_transpose3d_backward_stub, &slow_conv_transpose3d_backward_cuda);
+REGISTER_CUDA_DISPATCH(slow_conv_transpose3d_backward_stub, &slow_conv_transpose3d_backward_cuda)
 
 } // namespace at::native

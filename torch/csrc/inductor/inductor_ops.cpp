@@ -8,15 +8,21 @@
 #include <torch/csrc/inductor/inductor_ops.h>
 #include <torch/library.h>
 
-#include <ATen/native/Resize.h>
+#include <optional>
 
-#ifdef USE_CUDA
-#include <ATen/native/cuda/Resize.h>
-#endif
-
-namespace torch {
-namespace inductor {
+namespace torch::inductor {
 using namespace at;
+
+Tensor _mm_plus_mm_out(
+    Tensor& out,
+    const Tensor& a,
+    const Tensor& b,
+    const Tensor& c,
+    const Tensor& d) {
+  at::mm_out(out, a, b);
+  out.addmm_(c, d);
+  return out;
+}
 
 Tensor _mm_plus_mm(
     const Tensor& a,
@@ -24,9 +30,7 @@ Tensor _mm_plus_mm(
     const Tensor& c,
     const Tensor& d,
     Tensor& out) {
-  at::mm_out(out, a, b);
-  out.addmm_(c, d);
-  return out;
+  return _mm_plus_mm_out(out, a, b, c, d);
 }
 
 Tensor _alloc_from_pool(
@@ -43,7 +47,8 @@ Tensor _alloc_from_pool(
       self.key_set(),
       caffe2::TypeMeta::fromScalarType(dtype));
   auto* self_tmp_ = self_.unsafeGetTensorImpl();
-  self_tmp_->set_storage_offset(offset_bytes / c10::elementSize(dtype));
+  self_tmp_->set_storage_offset(
+      offset_bytes / static_cast<int64_t>(c10::elementSize(dtype)));
   self_tmp_->set_sizes_and_strides(size, stride);
   return self_;
 }
@@ -64,40 +69,55 @@ Tensor _reinterpret_tensor(
   return self_;
 }
 
-static void accumulate_grad_(const Tensor& variable, const Tensor& new_grad) {
-  at::Tensor& grad = variable.mutable_grad();
-  if (new_grad.device() != kMeta) {
+static std::optional<Tensor> accumulate_grad_(
+    const Tensor& variable,
+    const std::optional<Tensor>& variable_grad,
+    const std::optional<Tensor>& new_grad) {
+  if (!new_grad.has_value()) {
+    if (!variable_grad.has_value() || !variable_grad->defined()) {
+      return std::nullopt;
+    }
+    at::Tensor grad = variable_grad->clone();
+    variable.mutable_grad() = grad;
+    return grad;
+  }
+
+  at::Tensor grad = variable_grad.has_value() && variable_grad->defined()
+      ? variable_grad->clone()
+      : Tensor();
+  if (new_grad->device() != kMeta && !grad.defined()) {
+    // Unlike eager AccumulateGrad, this op's schema does not allow the returned
+    // grad to alias any input. Clone when initializing grad so
+    // functionalization can safely model the output as fresh.
+    if (new_grad->is_sparse() || new_grad->is_sparse_csr() ||
+        new_grad->is_nested() || new_grad->is_mkldnn()) {
+      grad = new_grad->clone();
+    } else {
+      grad = torch::autograd::utils::clone_obey_contract(*new_grad, variable);
+    }
+  } else if (new_grad->device() != kMeta) {
     // Do not call into this codepath from C++ frontend, instead call directly
-    // into accumulateGrad with num_expected_refs set to 1 Here,
-    // num_expected_refs is set to 2 to steal the gradient when this is called
-    // from Python
+    // into accumulateGrad. The refcount argument only affects no-existing-grad
+    // steal paths, which are handled above to avoid input aliasing.
     torch::autograd::AccumulateGrad::accumulateGrad(
         variable,
         grad,
-        new_grad,
+        *new_grad,
         2 /* num_expected_refs */,
         [&grad](at::Tensor&& grad_update) { grad = std::move(grad_update); });
   } else {
     // no shape checking for `device="meta"` to workaround FSDP inplace mutation
     if (!grad.defined()) {
-      grad = new_grad;
+      grad = new_grad->clone();
     }
   }
-}
-
-static void resize_storage_bytes_(const Tensor& variable, SymInt new_size) {
-  // similar to THPStorage_resize_ in StorageMethods.cpp, but is traceable
-  if (variable.storage().device_type() == at::kCUDA) {
-    // rocm build has undefined reference to resize_bytes_cuda
-#if defined(USE_CUDA) && !defined(USE_ROCM)
-    at::native::resize_bytes_cuda(
-        variable.storage().unsafeGetStorageImpl(), new_size.expect_int());
-#else
-    TORCH_CHECK(false, "built without cuda");
-#endif
-  } else {
-    at::native::resize_bytes_nocuda(variable.storage(), new_size);
+  if (!grad.defined()) {
+    return std::nullopt;
   }
+  // Compiled autograd graphs use this op as the grad-accumulation side effect,
+  // but functionalization still requires the returned grad to be fresh.
+  variable.mutable_grad() = grad;
+  return grad;
 }
 
 TORCH_LIBRARY_FRAGMENT(inductor, m) {
@@ -115,15 +135,16 @@ TORCH_LIBRARY_FRAGMENT(inductor, m) {
           c10::DispatchKey::CompositeExplicitAutograd, _reinterpret_tensor),
       {at::Tag::pt2_compliant_tag});
   m.def(
-      "accumulate_grad_(Tensor variable, Tensor new_grad) -> ()",
+      "accumulate_grad_(Tensor variable, Tensor? variable_grad, Tensor? new_grad) -> Tensor?",
       dispatch(c10::DispatchKey::CompositeExplicitAutograd, accumulate_grad_),
-      {at::Tag::pt2_compliant_tag});
-  m.def(
-      "resize_storage_bytes_(Tensor variable, SymInt new_size) -> ()",
-      dispatch(
-          c10::DispatchKey::CompositeExplicitAutograd, resize_storage_bytes_),
       {at::Tag::pt2_compliant_tag});
 }
 
-} // namespace inductor
-} // namespace torch
+TORCH_LIBRARY_FRAGMENT(inductor_prims, m) {
+  m.def(
+      "inductor_reserve_rng_state(Generator? generator, SymInt increment) "
+      "-> (Tensor, Tensor, Tensor)",
+      {at::Tag::pt2_compliant_tag});
+}
+
+} // namespace torch::inductor

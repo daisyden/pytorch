@@ -2,7 +2,6 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/Config.h>
 #include <ATen/Dispatch.h>
-#include <ATen/NamedTensorUtils.h>
 #include <ATen/SparseTensorImpl.h>
 #include <ATen/native/SparseTensorUtils.h>
 #include <ATen/native/Resize.h>
@@ -159,8 +158,7 @@ void _csr_matmult(
       }
     }
 
-    for (C10_UNUSED const auto jj : c10::irange(length)) {
-
+    for ([[maybe_unused]] const auto jj : c10::irange(length)) {
       // NOTE: the linked list that encodes col indices
       // is not guaranteed to be sorted.
       Cj[nnz] = head;

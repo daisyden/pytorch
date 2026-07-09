@@ -1,13 +1,18 @@
 //  Copyright © 2023 Apple Inc.
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/UpSample.h>
-#include <ATen/native/mps/MPSGraphVenturaOps.h>
 #include <ATen/native/mps/OperationUtils.h>
+#include <c10/util/accumulate.h>
+#include <fmt/format.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
 #else
+#include <ATen/ops/_upsample_bicubic2d_aa_backward_native.h>
+#include <ATen/ops/_upsample_bicubic2d_aa_native.h>
+#include <ATen/ops/_upsample_bilinear2d_aa_backward_native.h>
+#include <ATen/ops/_upsample_bilinear2d_aa_native.h>
 #include <ATen/ops/_upsample_nearest_exact1d.h>
 #include <ATen/ops/_upsample_nearest_exact1d_backward.h>
 #include <ATen/ops/_upsample_nearest_exact1d_backward_native.h>
@@ -16,6 +21,10 @@
 #include <ATen/ops/_upsample_nearest_exact2d_backward.h>
 #include <ATen/ops/_upsample_nearest_exact2d_backward_native.h>
 #include <ATen/ops/_upsample_nearest_exact2d_native.h>
+#include <ATen/ops/_upsample_nearest_exact3d_backward_native.h>
+#include <ATen/ops/_upsample_nearest_exact3d_native.h>
+#include <ATen/ops/upsample_bicubic2d_backward_native.h>
+#include <ATen/ops/upsample_bicubic2d_native.h>
 #include <ATen/ops/upsample_bilinear2d.h>
 #include <ATen/ops/upsample_bilinear2d_backward.h>
 #include <ATen/ops/upsample_bilinear2d_backward_native.h>
@@ -32,9 +41,18 @@
 #include <ATen/ops/upsample_nearest2d_backward.h>
 #include <ATen/ops/upsample_nearest2d_backward_native.h>
 #include <ATen/ops/upsample_nearest2d_native.h>
+#include <ATen/ops/upsample_nearest3d_backward_native.h>
+#include <ATen/ops/upsample_nearest3d_native.h>
+#include <ATen/ops/upsample_trilinear3d_backward_native.h>
+#include <ATen/ops/upsample_trilinear3d_native.h>
 #endif
+
+#include <ATen/native/mps/kernels/UpSample.h>
+
 namespace at::native {
-namespace mps {
+using namespace mps;
+
+namespace {
 
 // Upsampling operations (1D/2D forward and backward)
 // supported resize_mode: 'nearest' | 'bilinear' | 'nearest-exact'
@@ -45,7 +63,8 @@ static void upsample_out_template(const Tensor& input,
                                   std::optional<double> scale_w_opt,
                                   const Tensor& output,
                                   bool align_corners,
-                                  const c10::string_view resize_mode_str) {
+                                  const std::string_view resize_mode_str) {
+  TORCH_CHECK_NOT_IMPLEMENTED(!input.is_complex(), "upsample for MPS does not support complex inputs");
   if (input.numel() == 0) {
     return;
   }
@@ -56,7 +75,7 @@ static void upsample_out_template(const Tensor& input,
     native::upsample_2d_common_check(input.sizes(), output_size);
   }
   Tensor out;
-  if (!output.is_contiguous()) {
+  if (needsGather(output)) {
     out = at::empty_like(output, MemoryFormat::Contiguous);
   }
 
@@ -74,10 +93,9 @@ static void upsample_out_template(const Tensor& input,
     centerResults = true;
     nearestRoundingMode = MPSGraphResizeNearestRoundingModeRoundPreferCeil;
   } else {
-    AT_ERROR("Unsupported resize mode ", resize_mode_str);
+    TORCH_CHECK(false, "Unsupported resize mode ", resize_mode_str);
   }
 
-  const bool is_macOS_13_0_or_newer = is_macos_13_or_newer();
   const int64_t output_width = output_size.size() > 1 ? output_size[1] : output_size[0];
   const int64_t output_height = output_size.size() > 1 ? output_size[0] : (output.dim() > 2 ? output.size(-2) : 1);
   const float scale_w = (scale_w_opt.value_or(0.) > 0.) ? static_cast<float>(scale_w_opt.value()) : 0.;
@@ -98,8 +116,8 @@ static void upsample_out_template(const Tensor& input,
   MPSStream* stream = getCurrentMPSStream();
 
   @autoreleasepool {
-    string key = "upsample_" + std::string(resize_mode_str) + (align_corners ? "_aligned_corners" : "") +
-        getTensorsStringKey({input}) + ":[" + to_string(scale_h) + "," + to_string(scale_w) + "]:[" +
+    std::string key = "upsample_" + std::string(resize_mode_str) + (align_corners ? "_aligned_corners" : "") +
+        getTensorsStringKey({input}) + ":[" + std::to_string(scale_h) + "," + std::to_string(scale_w) + "]:[" +
         (is_backward_pass ? getArrayRefString(input_size) : "Undefined") + "]";
 
     auto cachedGraph = LookUpOrCreateCachedGraph<CachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
@@ -126,93 +144,73 @@ static void upsample_out_template(const Tensor& input,
                                                                            count:input_dim.size()]
                                               dataType:getMPSDataType(input)];
       }
-      if (is_macOS_13_0_or_newer) {
-        if (!is_backward_pass) {
-          if (scaleOffsetTensor && !align_corners) {
-            if (resizeMode == MPSGraphResizeNearest) {
-              newCachedGraph->outputTensor = [mpsGraph resizeNearestWithTensor:newCachedGraph->inputTensor
-                                                                    sizeTensor:newCachedGraph->outputSizeTensor
-                                                             scaleOffsetTensor:scaleOffsetTensor
-                                                           nearestRoundingMode:nearestRoundingMode
-                                                                        layout:dataLayout
-                                                                          name:nil];
-            } else { // bilinear forward
-              newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithTensor:newCachedGraph->inputTensor
-                                                                     sizeTensor:newCachedGraph->outputSizeTensor
-                                                              scaleOffsetTensor:scaleOffsetTensor
-                                                                         layout:dataLayout
-                                                                           name:nil];
-            }
-          } else { // scaleOffsetTensor == nil || align_corners
-            if (resizeMode == MPSGraphResizeNearest) {
-              newCachedGraph->outputTensor = [mpsGraph resizeNearestWithTensor:newCachedGraph->inputTensor
-                                                                    sizeTensor:newCachedGraph->outputSizeTensor
-                                                           nearestRoundingMode:nearestRoundingMode
-                                                                  centerResult:centerResults
-                                                                  alignCorners:align_corners
-                                                                        layout:dataLayout
-                                                                          name:nil];
-            } else { // bilinear forward
-              newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithTensor:newCachedGraph->inputTensor
-                                                                     sizeTensor:newCachedGraph->outputSizeTensor
-                                                                   centerResult:centerResults
-                                                                   alignCorners:align_corners
-                                                                         layout:dataLayout
-                                                                           name:nil];
-            }
+      if (!is_backward_pass) {
+        if (scaleOffsetTensor && !align_corners) {
+          if (resizeMode == MPSGraphResizeNearest) {
+            newCachedGraph->outputTensor = [mpsGraph resizeNearestWithTensor:newCachedGraph->inputTensor
+                                                                  sizeTensor:newCachedGraph->outputSizeTensor
+                                                           scaleOffsetTensor:scaleOffsetTensor
+                                                         nearestRoundingMode:nearestRoundingMode
+                                                                      layout:dataLayout
+                                                                        name:nil];
+          } else { // bilinear forward
+            newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithTensor:newCachedGraph->inputTensor
+                                                                   sizeTensor:newCachedGraph->outputSizeTensor
+                                                            scaleOffsetTensor:scaleOffsetTensor
+                                                                       layout:dataLayout
+                                                                         name:nil];
           }
-        } else { // is_backward_pass == true
-          if (scaleOffsetTensor && !align_corners) {
-            if (resizeMode == MPSGraphResizeNearest) {
-              newCachedGraph->outputTensor = [mpsGraph resizeNearestWithGradientTensor:newCachedGraph->inputTensor
-                                                                                 input:inputSizeTensor
-                                                                     scaleOffsetTensor:scaleOffsetTensor
-                                                                   nearestRoundingMode:nearestRoundingMode
-                                                                                layout:dataLayout
-                                                                                  name:nil];
-            } else { // bilinear backward
-              newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithGradientTensor:newCachedGraph->inputTensor
-                                                                                  input:inputSizeTensor
-                                                                      scaleOffsetTensor:scaleOffsetTensor
-                                                                                 layout:dataLayout
-                                                                                   name:nil];
-            }
-          } else { // scaleOffsetTensor == nil || align_corners
-            if (resizeMode == MPSGraphResizeNearest) {
-              newCachedGraph->outputTensor = [mpsGraph resizeNearestWithGradientTensor:newCachedGraph->inputTensor
-                                                                                 input:inputSizeTensor
-                                                                   nearestRoundingMode:nearestRoundingMode
-                                                                          centerResult:centerResults
-                                                                          alignCorners:align_corners
-                                                                                layout:dataLayout
-                                                                                  name:nil];
-            } else { // bilinear backward
-              newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithGradientTensor:newCachedGraph->inputTensor
-                                                                                  input:inputSizeTensor
-                                                                           centerResult:centerResults
-                                                                           alignCorners:align_corners
-                                                                                 layout:dataLayout
-                                                                                   name:nil];
-            }
+        } else { // scaleOffsetTensor == nil || align_corners
+          if (resizeMode == MPSGraphResizeNearest) {
+            newCachedGraph->outputTensor = [mpsGraph resizeNearestWithTensor:newCachedGraph->inputTensor
+                                                                  sizeTensor:newCachedGraph->outputSizeTensor
+                                                         nearestRoundingMode:nearestRoundingMode
+                                                                centerResult:centerResults
+                                                                alignCorners:align_corners
+                                                                      layout:dataLayout
+                                                                        name:nil];
+          } else { // bilinear forward
+            newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithTensor:newCachedGraph->inputTensor
+                                                                   sizeTensor:newCachedGraph->outputSizeTensor
+                                                                 centerResult:centerResults
+                                                                 alignCorners:align_corners
+                                                                       layout:dataLayout
+                                                                         name:nil];
           }
         }
-      } else { // if macOS version < 13.0 (for backwards compatibility)
-        if (!is_backward_pass) {
-          newCachedGraph->outputTensor = [mpsGraph resizeTensor:newCachedGraph->inputTensor
-                                                     sizeTensor:newCachedGraph->outputSizeTensor
-                                                           mode:resizeMode
-                                                   centerResult:centerResults
-                                                   alignCorners:align_corners
-                                                         layout:dataLayout
-                                                           name:nil];
-        } else {
-          newCachedGraph->outputTensor = [mpsGraph resizeWithGradientTensor:newCachedGraph->inputTensor
-                                                                      input:inputSizeTensor
-                                                                       mode:resizeMode
-                                                               centerResult:centerResults
-                                                               alignCorners:align_corners
-                                                                     layout:dataLayout
-                                                                       name:nil];
+      } else { // is_backward_pass == true
+        if (scaleOffsetTensor && !align_corners) {
+          if (resizeMode == MPSGraphResizeNearest) {
+            newCachedGraph->outputTensor = [mpsGraph resizeNearestWithGradientTensor:newCachedGraph->inputTensor
+                                                                               input:inputSizeTensor
+                                                                   scaleOffsetTensor:scaleOffsetTensor
+                                                                 nearestRoundingMode:nearestRoundingMode
+                                                                              layout:dataLayout
+                                                                                name:nil];
+          } else { // bilinear backward
+            newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithGradientTensor:newCachedGraph->inputTensor
+                                                                                input:inputSizeTensor
+                                                                    scaleOffsetTensor:scaleOffsetTensor
+                                                                               layout:dataLayout
+                                                                                 name:nil];
+          }
+        } else { // scaleOffsetTensor == nil || align_corners
+          if (resizeMode == MPSGraphResizeNearest) {
+            newCachedGraph->outputTensor = [mpsGraph resizeNearestWithGradientTensor:newCachedGraph->inputTensor
+                                                                               input:inputSizeTensor
+                                                                 nearestRoundingMode:nearestRoundingMode
+                                                                        centerResult:centerResults
+                                                                        alignCorners:align_corners
+                                                                              layout:dataLayout
+                                                                                name:nil];
+          } else { // bilinear backward
+            newCachedGraph->outputTensor = [mpsGraph resizeBilinearWithGradientTensor:newCachedGraph->inputTensor
+                                                                                input:inputSizeTensor
+                                                                         centerResult:centerResults
+                                                                         alignCorners:align_corners
+                                                                               layout:dataLayout
+                                                                                 name:nil];
+          }
         }
       }
     });
@@ -237,37 +235,76 @@ static void upsample_out_template(const Tensor& input,
   }
 }
 
-} // namespace mps
+#ifndef PYTORCH_JIT_COMPILE_SHADERS
+static auto& lib = MetalShaderLibrary::getBundledLibrary();
+#else
+#include <ATen/native/mps/UpSample_metallib.h>
+#endif
 
-static bool check_mps_compatibility(const c10::string_view resize_mode_str, std::optional<double> scale) {
-  static const bool is_macOS_13_0_or_newer = is_macos_13_or_newer();
-  if (!is_macOS_13_0_or_newer) {
-    // passing scale factors to MPS's resize APIs is not supported on macOS < 13
-    if (scale.value_or(0.) > 0.) {
-      TORCH_WARN_ONCE("MPS: passing scale factor to upsample ops is supported natively starting from macOS 13.0. ",
-                      "Falling back on CPU. This may have performance implications.");
-      return false;
-      // nearest mode on Monterey uses round() to compute source indices which
-      // is incompatible with PyTorch that uses floor(). So we fallback to CPU on Monterey.
-      // The nearest mode should work fine on Ventura.
-    } else if (resize_mode_str == "nearest" || resize_mode_str == "nearest-exact") {
-      TORCH_WARN_ONCE("MPS: '",
-                      resize_mode_str,
-                      "' mode upsampling is supported natively starting from macOS 13.0. ",
-                      "Falling back on CPU. This may have performance implications.");
-      return false;
+// Encode a forward/backward upsample kernel: bind the PSO, the two tensors and
+// the params struct, then launch one thread per output spatial element.
+template <typename params_t>
+static void dispatch_upsample(const std::string& fname,
+                              const Tensor& a,
+                              const Tensor& b,
+                              const params_t& params,
+                              int64_t njobs) {
+  auto upsamplePSO = lib.getPipelineStateForFunc(fname);
+  auto stream = getCurrentMPSStream();
+  dispatch_sync_with_rethrow(stream->queue(), ^() {
+    @autoreleasepool {
+      auto computeEncoder = stream->commandEncoder();
+      [computeEncoder setComputePipelineState:upsamplePSO];
+      mtl_setArgs(computeEncoder, a, b, params);
+      mtl_dispatch1DJob(computeEncoder, upsamplePSO, njobs);
     }
-  }
-  return true;
+  });
 }
+
+// scales are innermost-first (w, h, d), matching UpsampleParams; the constructor
+// consumes the first N-2 entries.
+template <unsigned N>
+static void upsample_kernel_out_template(const Tensor& input,
+                                         IntArrayRef output_size,
+                                         bool align_corners,
+                                         std::initializer_list<std::optional<double>> scales,
+                                         const Tensor& output,
+                                         const std::string& name) {
+  if (output.numel() == 0) {
+    return;
+  }
+  UpsampleParams<N> params(input, output, align_corners, scales);
+  dispatch_upsample(fmt::format("upsample_{}_{}", name, scalarToMetalTypeString(input)),
+                    input,
+                    output,
+                    params,
+                    c10::multiply_integers(output_size));
+}
+
+template <unsigned N>
+static void upsample_kernel_backward_out_template(const Tensor& grad_input,
+                                                  const Tensor& grad_output,
+                                                  IntArrayRef output_size,
+                                                  bool align_corners,
+                                                  std::initializer_list<std::optional<double>> scales,
+                                                  const std::string& name) {
+  grad_input.zero_();
+  if (grad_output.numel() == 0) {
+    return;
+  }
+  UpsampleParams<N> params(grad_input, grad_output, align_corners, scales);
+  dispatch_upsample(fmt::format("upsample_{}_backward_{}", name, scalarToMetalTypeString(grad_input)),
+                    grad_input,
+                    grad_output,
+                    params,
+                    c10::multiply_integers(output_size));
+}
+
+} // anonymous namespace
 
 TORCH_IMPL_FUNC(upsample_nearest1d_out_mps)
 (const Tensor& input, IntArrayRef output_size, std::optional<double> scale, const Tensor& output) {
-  if (check_mps_compatibility("nearest", scale)) {
-    mps::upsample_out_template(input, output_size, c10::nullopt, c10::nullopt, scale, output, false, "nearest");
-  } else {
-    output.copy_(at::upsample_nearest1d(input.to("cpu"), output_size, scale));
-  }
+  upsample_kernel_out_template<3>(input, output_size, false, {scale}, output, "nearest1d");
 }
 
 TORCH_IMPL_FUNC(upsample_nearest1d_backward_out_mps)
@@ -276,20 +313,12 @@ TORCH_IMPL_FUNC(upsample_nearest1d_backward_out_mps)
  IntArrayRef input_size,
  std::optional<double> scale,
  const Tensor& grad_input) {
-  if (check_mps_compatibility("nearest", scale)) {
-    mps::upsample_out_template(grad_output, output_size, input_size, c10::nullopt, scale, grad_input, false, "nearest");
-  } else {
-    grad_input.copy_(at::upsample_nearest1d_backward(grad_output.to("cpu"), output_size, input_size, scale));
-  }
+  upsample_out_template(grad_output, output_size, input_size, std::nullopt, scale, grad_input, false, "nearest");
 }
 
 TORCH_IMPL_FUNC(_upsample_nearest_exact1d_out_mps)
 (const Tensor& input, IntArrayRef output_size, std::optional<double> scale, const Tensor& output) {
-  if (check_mps_compatibility("nearest-exact", scale)) {
-    mps::upsample_out_template(input, output_size, c10::nullopt, c10::nullopt, scale, output, false, "nearest-exact");
-  } else {
-    output.copy_(at::_upsample_nearest_exact1d(input.to("cpu"), output_size, scale));
-  }
+  upsample_kernel_out_template<3>(input, output_size, false, {scale}, output, "nearest_exact1d");
 }
 
 TORCH_IMPL_FUNC(_upsample_nearest_exact1d_backward_out_mps)
@@ -298,12 +327,7 @@ TORCH_IMPL_FUNC(_upsample_nearest_exact1d_backward_out_mps)
  IntArrayRef input_size,
  std::optional<double> scale,
  const Tensor& grad_input) {
-  if (check_mps_compatibility("nearest-exact", scale)) {
-    mps::upsample_out_template(
-        grad_output, output_size, input_size, c10::nullopt, scale, grad_input, false, "nearest-exact");
-  } else {
-    grad_input.copy_(at::_upsample_nearest_exact1d_backward(grad_output.to("cpu"), output_size, input_size, scale));
-  }
+  upsample_out_template(grad_output, output_size, input_size, std::nullopt, scale, grad_input, false, "nearest-exact");
 }
 
 TORCH_IMPL_FUNC(upsample_nearest2d_out_mps)
@@ -312,11 +336,7 @@ TORCH_IMPL_FUNC(upsample_nearest2d_out_mps)
  std::optional<double> scales_h,
  std::optional<double> scales_w,
  const Tensor& output) {
-  if (check_mps_compatibility("nearest", scales_w)) {
-    mps::upsample_out_template(input, output_size, c10::nullopt, scales_h, scales_w, output, false, "nearest");
-  } else {
-    output.copy_(at::upsample_nearest2d(input.to("cpu"), output_size, scales_h, scales_w));
-  }
+  upsample_kernel_out_template<4>(input, output_size, false, {scales_w, scales_h}, output, "nearest2d");
 }
 
 TORCH_IMPL_FUNC(upsample_nearest2d_backward_out_mps)
@@ -326,12 +346,7 @@ TORCH_IMPL_FUNC(upsample_nearest2d_backward_out_mps)
  std::optional<double> scales_h,
  std::optional<double> scales_w,
  const Tensor& grad_input) {
-  if (check_mps_compatibility("nearest", scales_w)) {
-    mps::upsample_out_template(grad_output, output_size, input_size, scales_h, scales_w, grad_input, false, "nearest");
-  } else {
-    grad_input.copy_(
-        at::upsample_nearest2d_backward(grad_output.to("cpu"), output_size, input_size, scales_h, scales_w));
-  }
+  upsample_out_template(grad_output, output_size, input_size, scales_h, scales_w, grad_input, false, "nearest");
 }
 
 TORCH_IMPL_FUNC(_upsample_nearest_exact2d_out_mps)
@@ -340,11 +355,7 @@ TORCH_IMPL_FUNC(_upsample_nearest_exact2d_out_mps)
  std::optional<double> scales_h,
  std::optional<double> scales_w,
  const Tensor& output) {
-  if (check_mps_compatibility("nearest-exact", scales_w)) {
-    mps::upsample_out_template(input, output_size, c10::nullopt, scales_h, scales_w, output, false, "nearest-exact");
-  } else {
-    output.copy_(at::_upsample_nearest_exact2d(input.to("cpu"), output_size, scales_h, scales_w));
-  }
+  upsample_kernel_out_template<4>(input, output_size, false, {scales_w, scales_h}, output, "nearest_exact2d");
 }
 
 TORCH_IMPL_FUNC(_upsample_nearest_exact2d_backward_out_mps)
@@ -354,23 +365,12 @@ TORCH_IMPL_FUNC(_upsample_nearest_exact2d_backward_out_mps)
  std::optional<double> scales_h,
  std::optional<double> scales_w,
  const Tensor& grad_input) {
-  if (check_mps_compatibility("nearest-exact", scales_w)) {
-    mps::upsample_out_template(
-        grad_output, output_size, input_size, scales_h, scales_w, grad_input, false, "nearest-exact");
-  } else {
-    grad_input.copy_(
-        at::_upsample_nearest_exact2d_backward(grad_output.to("cpu"), output_size, input_size, scales_h, scales_w));
-  }
+  upsample_out_template(grad_output, output_size, input_size, scales_h, scales_w, grad_input, false, "nearest-exact");
 }
 
 TORCH_IMPL_FUNC(upsample_linear1d_out_mps)
 (const Tensor& input, IntArrayRef output_size, bool align_corners, std::optional<double> scale, const Tensor& output) {
-  if (check_mps_compatibility("bilinear", scale)) {
-    mps::upsample_out_template(
-        input, output_size, c10::nullopt, c10::nullopt, scale, output, align_corners, "bilinear");
-  } else {
-    output.copy_(at::upsample_linear1d(input.to("cpu"), output_size, align_corners, scale));
-  }
+  upsample_kernel_out_template<3>(input, output_size, align_corners, {scale}, output, "linear1d");
 }
 
 TORCH_IMPL_FUNC(upsample_linear1d_backward_out_mps)
@@ -380,13 +380,8 @@ TORCH_IMPL_FUNC(upsample_linear1d_backward_out_mps)
  bool align_corners,
  std::optional<double> scale,
  const Tensor& grad_input) {
-  if (check_mps_compatibility("bilinear", scale)) {
-    mps::upsample_out_template(
-        grad_output, output_size, input_size, c10::nullopt, scale, grad_input, align_corners, "bilinear");
-  } else {
-    grad_input.copy_(
-        at::upsample_linear1d_backward(grad_output.to("cpu"), output_size, input_size, align_corners, scale));
-  }
+  upsample_out_template(
+      grad_output, output_size, input_size, std::nullopt, scale, grad_input, align_corners, "bilinear");
 }
 
 TORCH_IMPL_FUNC(upsample_bilinear2d_out_mps)
@@ -396,11 +391,7 @@ TORCH_IMPL_FUNC(upsample_bilinear2d_out_mps)
  std::optional<double> scales_h,
  std::optional<double> scales_w,
  const Tensor& output) {
-  if (check_mps_compatibility("bilinear", scales_w)) {
-    mps::upsample_out_template(input, output_size, c10::nullopt, scales_h, scales_w, output, align_corners, "bilinear");
-  } else {
-    output.copy_(at::upsample_bilinear2d(input.to("cpu"), output_size, align_corners, scales_h, scales_w));
-  }
+  upsample_kernel_out_template<4>(input, output_size, align_corners, {scales_w, scales_h}, output, "bilinear2d");
 }
 
 TORCH_IMPL_FUNC(upsample_bilinear2d_backward_out_mps)
@@ -411,13 +402,141 @@ TORCH_IMPL_FUNC(upsample_bilinear2d_backward_out_mps)
  std::optional<double> scales_h,
  std::optional<double> scales_w,
  const Tensor& grad_input) {
-  if (check_mps_compatibility("bilinear", scales_w)) {
-    mps::upsample_out_template(
-        grad_output, output_size, input_size, scales_h, scales_w, grad_input, align_corners, "bilinear");
-  } else {
-    grad_input.copy_(at::upsample_bilinear2d_backward(
-        grad_output.to("cpu"), output_size, input_size, align_corners, scales_h, scales_w));
-  }
+  upsample_out_template(
+      grad_output, output_size, input_size, scales_h, scales_w, grad_input, align_corners, "bilinear");
+}
+
+TORCH_IMPL_FUNC(upsample_bicubic2d_out_mps)
+(const Tensor& input,
+ IntArrayRef output_size,
+ bool align_corners,
+ std::optional<double> scales_h,
+ std::optional<double> scales_w,
+ const Tensor& output) {
+  upsample_kernel_out_template<4>(input, output_size, align_corners, {scales_w, scales_h}, output, "bicubic2d");
+}
+
+TORCH_IMPL_FUNC(upsample_bicubic2d_backward_out_mps)
+(const Tensor& grad_output,
+ IntArrayRef output_size,
+ IntArrayRef input_size,
+ bool align_corners,
+ std::optional<double> scales_h,
+ std::optional<double> scales_w,
+ const Tensor& grad_input) {
+  upsample_kernel_backward_out_template<4>(
+      grad_input, grad_output, output_size, align_corners, {scales_w, scales_h}, "bicubic2d");
+}
+
+TORCH_IMPL_FUNC(_upsample_bilinear2d_aa_out_mps)
+(const Tensor& input,
+ IntArrayRef output_size,
+ bool align_corners,
+ std::optional<double> scales_h,
+ std::optional<double> scales_w,
+ const Tensor& output) {
+  TORCH_CHECK(at::isFloatingType(input.scalar_type()),
+              "_upsample_bilineard2d_aa_out_mps only supports floating-point dtypes");
+  upsample_kernel_out_template<4>(input, output_size, align_corners, {scales_w, scales_h}, output, "bilinear2d_aa");
+}
+
+TORCH_IMPL_FUNC(_upsample_bilinear2d_aa_backward_out_mps)
+(const Tensor& grad_output,
+ IntArrayRef output_size,
+ IntArrayRef input_size,
+ bool align_corners,
+ std::optional<double> scales_h,
+ std::optional<double> scales_w,
+ const Tensor& grad_input) {
+  upsample_kernel_backward_out_template<4>(
+      grad_input, grad_output, output_size, align_corners, {scales_w, scales_h}, "bilinear2d_aa");
+}
+
+TORCH_IMPL_FUNC(_upsample_bicubic2d_aa_backward_out_mps)
+(const Tensor& grad_output,
+ IntArrayRef output_size,
+ IntArrayRef input_size,
+ bool align_corners,
+ std::optional<double> scales_h,
+ std::optional<double> scales_w,
+ const Tensor& grad_input) {
+  upsample_kernel_backward_out_template<4>(
+      grad_input, grad_output, output_size, align_corners, {scales_w, scales_h}, "bicubic2d_aa");
+}
+
+TORCH_IMPL_FUNC(_upsample_bicubic2d_aa_out_mps)
+(const Tensor& input,
+ IntArrayRef output_size,
+ bool align_corners,
+ std::optional<double> scales_h,
+ std::optional<double> scales_w,
+ const Tensor& output) {
+  TORCH_CHECK(at::isFloatingType(input.scalar_type()),
+              "_upsample_bicubic2d_aa_out_mps only supports floating-point dtypes");
+  upsample_kernel_out_template<4>(input, output_size, align_corners, {scales_w, scales_h}, output, "bicubic2d_aa");
+}
+
+TORCH_IMPL_FUNC(upsample_nearest3d_out_mps)(const Tensor& input,
+                                            IntArrayRef output_size,
+                                            std::optional<double> scales_d,
+                                            std::optional<double> scales_h,
+                                            std::optional<double> scales_w,
+                                            const Tensor& output) {
+  upsample_kernel_out_template<5>(input, output_size, false, {scales_w, scales_h, scales_d}, output, "nearest_3d");
+}
+
+TORCH_IMPL_FUNC(_upsample_nearest_exact3d_out_mps)(const Tensor& input,
+                                                   IntArrayRef output_size,
+                                                   std::optional<double> scales_d,
+                                                   std::optional<double> scales_h,
+                                                   std::optional<double> scales_w,
+                                                   const Tensor& output) {
+  upsample_kernel_out_template<5>(
+      input, output_size, false, {scales_w, scales_h, scales_d}, output, "nearest_exact_3d");
+}
+
+TORCH_IMPL_FUNC(upsample_nearest3d_backward_out_mps)(const Tensor& grad_output,
+                                                     IntArrayRef output_size,
+                                                     IntArrayRef input_size,
+                                                     std::optional<double> scales_d,
+                                                     std::optional<double> scales_h,
+                                                     std::optional<double> scales_w,
+                                                     const Tensor& grad_input) {
+  upsample_kernel_backward_out_template<5>(
+      grad_input, grad_output, output_size, false, {scales_w, scales_h, scales_d}, "nearest_3d");
+}
+
+TORCH_IMPL_FUNC(_upsample_nearest_exact3d_backward_out_mps)(const Tensor& grad_output,
+                                                            IntArrayRef output_size,
+                                                            IntArrayRef input_size,
+                                                            std::optional<double> scales_d,
+                                                            std::optional<double> scales_h,
+                                                            std::optional<double> scales_w,
+                                                            const Tensor& grad_input) {
+  upsample_kernel_backward_out_template<5>(
+      grad_input, grad_output, output_size, false, {scales_w, scales_h, scales_d}, "nearest_exact_3d");
+}
+
+TORCH_IMPL_FUNC(upsample_trilinear3d_out_mps)(const Tensor& input,
+                                              IntArrayRef output_size,
+                                              bool align_corners,
+                                              std::optional<double> scales_d,
+                                              std::optional<double> scales_h,
+                                              std::optional<double> scales_w,
+                                              const Tensor& output) {
+  upsample_kernel_out_template<5>(
+      input, output_size, align_corners, {scales_w, scales_h, scales_d}, output, "trilinear");
+}
+TORCH_IMPL_FUNC(upsample_trilinear3d_backward_out_mps)(const Tensor& grad_output,
+                                                       IntArrayRef output_size,
+                                                       IntArrayRef input_size,
+                                                       bool align_corners,
+                                                       std::optional<double> scales_d,
+                                                       std::optional<double> scales_h,
+                                                       std::optional<double> scales_w,
+                                                       const Tensor& grad_input) {
+  upsample_kernel_backward_out_template<5>(
+      grad_input, grad_output, output_size, align_corners, {scales_w, scales_h, scales_d}, "trilinear");
 }
 
 } // namespace at::native

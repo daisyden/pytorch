@@ -33,10 +33,11 @@ struct bitset final {
   constexpr bitset() noexcept = default;
   constexpr bitset(const bitset&) noexcept = default;
   constexpr bitset(bitset&&) noexcept = default;
-  // there is an issure for gcc 5.3.0 when define default function as constexpr
+  // there is an issue for gcc 5.3.0 when define default function as constexpr
   // see https://gcc.gnu.org/bugzilla/show_bug.cgi?id=68754.
   bitset& operator=(const bitset&) noexcept = default;
   bitset& operator=(bitset&&) noexcept = default;
+  ~bitset() = default;
 
   constexpr void set(size_t index) noexcept {
     bitset_ |= (static_cast<long long int>(1) << index);
@@ -56,6 +57,7 @@ struct bitset final {
 
   // Call the given functor with the index of each bit that is set
   template <class Func>
+  // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
   void for_each_set_bit(Func&& func) const {
     bitset cur = *this;
     size_t index = cur.find_first_set();

@@ -1,15 +1,14 @@
-from .quantize import *  # noqa: F403
-from .observer import *  # noqa: F403
-from .qconfig import *  # noqa: F403
+# mypy: allow-untyped-defs
 from .fake_quantize import *  # noqa: F403
 from .fuse_modules import fuse_modules
-from .stubs import *  # noqa: F403
-from .quant_type import *  # noqa: F403
-from .quantize_jit import *  # noqa: F403
-
-# from .quantize_fx import *
-from .quantization_mappings import *  # noqa: F403
 from .fuser_method_mappings import *  # noqa: F403
+from .observer import *  # noqa: F403
+from .qconfig import *  # noqa: F403
+from .quant_type import *  # noqa: F403
+from .quantization_mappings import *  # noqa: F403
+from .quantize import *  # noqa: F403
+from .quantize_jit import *  # noqa: F403
+from .stubs import *  # noqa: F403
 
 
 def default_eval_fn(model, calib_data):
@@ -17,7 +16,7 @@ def default_eval_fn(model, calib_data):
     Default evaluation function takes a torch.utils.data.Dataset or a list of
     input Tensors and run the model on the dataset
     """
-    for data, target in calib_data:
+    for data, _target in calib_data:
         model(data)
 
 
@@ -35,8 +34,11 @@ __all__ = [
     # Top level API for graph mode quantization on TorchScript
     "quantize_jit",
     "quantize_dynamic_jit",
+    # pyrefly: ignore [bad-dunder-all]
     "_prepare_ondevice_dynamic_jit",
+    # pyrefly: ignore [bad-dunder-all]
     "_convert_ondevice_dynamic_jit",
+    # pyrefly: ignore [bad-dunder-all]
     "_quantize_ondevice_dynamic_jit",
     # Top level API for graph mode quantization on GraphModule(torch.fx)
     # 'fuse_fx', 'quantize_fx',  # TODO: add quantize_dynamic_fx
@@ -58,6 +60,7 @@ __all__ = [
     "default_eval_fn",
     # Observers
     "ObserverBase",
+    # pyrefly: ignore [bad-dunder-all]
     "WeightObserver",
     "HistogramObserver",
     "observer",

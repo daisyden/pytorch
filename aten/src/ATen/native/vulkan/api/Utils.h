@@ -11,7 +11,7 @@
 
 // Compiler Macros
 
-// Suppress an unused variable. Copied from C10_UNUSED
+// Suppress an unused variable. Copied from [[maybe_unused]]
 #if defined(_MSC_VER) && !defined(__clang__)
 #define VK_UNUSED __pragma(warning(suppress : 4100 4101))
 #else
@@ -197,7 +197,7 @@ inline constexpr To safe_downcast(const From& v) {
 
 template <typename To, typename From>
 inline constexpr bool is_signed_to_unsigned() {
-  return std::is_signed<From>::value && std::is_unsigned<To>::value;
+  return std::is_signed_v<From> && std::is_unsigned_v<To>;
 }
 
 } // namespace detail
@@ -253,7 +253,7 @@ using vec4 = vec<4u>;
 
 // uvec3 is the type representing tensor extents. Useful for debugging.
 inline std::ostream& operator<<(std::ostream& os, const uvec3& v) {
-  os << "(" << v.data[0u] << ", " << v.data[1u] << ", " << v.data[2u] << ")";
+  os << '(' << v.data[0u] << ", " << v.data[1u] << ", " << v.data[2u] << ')';
   return os;
 }
 

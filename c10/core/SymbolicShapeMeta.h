@@ -1,4 +1,5 @@
 #pragma once
+#include <c10/core/MemoryFormat.h>
 #include <c10/core/SymBool.h>
 #include <c10/core/SymInt.h>
 #include <c10/macros/Export.h>
@@ -22,7 +23,11 @@ class C10_API SymbolicShapeMeta {
   bool strides_valid_ = true; // e.g. for sparse where there are no strides
 
   SymbolicShapeMeta() = default;
+  ~SymbolicShapeMeta() = default;
   SymbolicShapeMeta(const SymbolicShapeMeta& other);
+  SymbolicShapeMeta(SymbolicShapeMeta&& other) = delete;
+  SymbolicShapeMeta& operator=(const SymbolicShapeMeta& other) = delete;
+  SymbolicShapeMeta& operator=(SymbolicShapeMeta&& other) = delete;
 
   void refresh_numel() {
     // Non-const, don't need to hold mutables_ lock
@@ -78,6 +83,15 @@ class C10_API SymbolicShapeMeta {
     return numel_;
   }
 
+  const SymBool& is_contiguous(at::MemoryFormat memory_format) const {
+    if (memory_format == at::MemoryFormat::ChannelsLast) {
+      return this->is_channels_last_contiguous();
+    } else if (memory_format == at::MemoryFormat::ChannelsLast3d) {
+      return this->is_channels_last_3d_contiguous();
+    }
+    return this->is_contiguous();
+  }
+
   const SymBool& is_contiguous() const {
     if (C10_UNLIKELY(!has_is_contiguous())) {
       init_is_contiguous();
@@ -127,7 +141,7 @@ class C10_API SymbolicShapeMeta {
     available_.fetch_or(is_contiguous_avail);
   }
   void assume_channels_last_contiguous(SymBool val = true) {
-    is_contiguous_ = std::move(val);
+    is_channels_last_contiguous_ = std::move(val);
     available_.fetch_or(is_channels_last_contiguous_avail);
   }
   void assume_channels_last_3d_contiguous(SymBool val = true) {
@@ -190,6 +204,7 @@ class C10_API SymbolicShapeMeta {
   // Lazily initialized variables, with the corresponding available_ flag
   // indicating whether the value has been initialized
   mutable std::atomic<int> available_{0};
+
   enum avail {
     numel_avail = 1 << 0,
     is_contiguous_avail = 1 << 1,

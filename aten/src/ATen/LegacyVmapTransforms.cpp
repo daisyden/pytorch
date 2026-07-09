@@ -1,6 +1,4 @@
 #include <ATen/LegacyVmapTransforms.h>
-#include <ATen/ATen.h>
-#include <ATen/core/IListRef.h>
 #include <c10/util/irange.h>
 
 namespace at {
@@ -35,7 +33,7 @@ static Tensor permuteBatchDimsToFront(BatchedTensorImpl* batched) {
     if (is_bdim[ptr]) {
       continue;
     }
-    permutation[idx++] = ptr;
+    permutation[idx++] = static_cast<int64_t>(ptr);
   }
   return physical_tensor.permute(permutation);
 }
@@ -49,7 +47,7 @@ VmapPhysicalView MultiBatchVmapTransform::logicalToPhysical(const Tensor& logica
 }
 
 int64_t VmapPhysicalView::numBatchDims() const {
-  return levels_.count();
+  return static_cast<int64_t>(levels_.count());
 }
 
 int64_t VmapPhysicalView::numLogicalDims() const {
@@ -202,7 +200,7 @@ MultiBatchVmapTransform::logicalToPhysical(ITensorListRef logical_tensors) {
   // batch dims have been moved to the front of the tensor. Any previously
   // non-existing batch dims get added to the tensors as new dimensions of size 1.
   std::vector<Tensor> physical_tensors;
-  int64_t num_batch_dims = collective_levels.count();
+  auto num_batch_dims = collective_levels.count();
   for (const auto& logical_tensor : logical_tensors) {
     auto requested_example_dim = /*logical_dim*/logical_tensor.dim();
     auto physical_tensor = alignBatchDimsAtFront(

@@ -5,8 +5,7 @@
 #include <torch/csrc/python_headers.h>
 #include <torch/csrc/utils/pybind.h>
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 
 struct PyAnomalyMetadata : public AnomalyMetadata {
   static constexpr const char* ANOMALY_TRACE_KEY = "traceback_";
@@ -17,6 +16,7 @@ struct PyAnomalyMetadata : public AnomalyMetadata {
     // NOLINTNEXTLINE(cppcoreguidelines-prefer-member-initializer)
     dict_ = PyDict_New();
   }
+  // NOLINTNEXTLINE(bugprone-exception-escape)
   ~PyAnomalyMetadata() override {
     // If python is already dead, leak the wrapped python objects
     if (Py_IsInitialized()) {
@@ -26,7 +26,7 @@ struct PyAnomalyMetadata : public AnomalyMetadata {
   }
   void store_stack() override;
   void print_stack(const std::string& current_node_name) override;
-  void assign_parent(const std::shared_ptr<Node>& parent_node) override;
+  void assign_parent(const c10::intrusive_ptr<Node>& parent_node) override;
 
   PyObject* dict() {
     return dict_;
@@ -40,5 +40,4 @@ void _print_stack(
     const std::string& current_node_name,
     bool is_parent);
 
-} // namespace autograd
-} // namespace torch
+} // namespace torch::autograd

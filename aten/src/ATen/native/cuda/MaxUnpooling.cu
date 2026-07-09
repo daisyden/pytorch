@@ -58,7 +58,7 @@ __global__ void max_unpooling3d_forward_kernel(
     const int64_t oH,
     const int64_t oW,
     const int64_t offsetZ) {
-  int64_t iColumn = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t iColumn = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
   int64_t iRow = blockIdx.y * blockDim.y + threadIdx.y;
   int64_t iFrame = (blockIdx.z + offsetZ) % input.size(1); // input frame/time
   int64_t slice = (blockIdx.z + offsetZ) / input.size(1); // input slice/feature
@@ -125,8 +125,6 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
   TORCH_CHECK(
       indices_.scalar_type() == at::ScalarType::Long,
       "elements in indices should be type int64 but got: ", indices_.scalar_type());
-  auto oheight = output_size[0];
-  auto owidth = output_size[1];
 
   TensorArg output_arg{output, "output", 1}, self_arg{self_, "self_", 2},
       indices_arg{indices_, "indices_", 3};
@@ -148,6 +146,16 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
   TORCH_CHECK(
       output_size.size() == 2,
       "There should be exactly two elements (height, width) in output_size, but got ", output_size.size(), " elements.");
+
+  auto oheight = output_size[0];
+  auto owidth = output_size[1];
+  TORCH_CHECK(
+      oheight >= 0 && owidth >= 0,
+      "max_unpooling2d(): output_size must contain non-negative spatial dimensions, but got output_size=(",
+      oheight,
+      ", ",
+      owidth,
+      ")");
 
   int64_t dimw = 2;
   int64_t dimh = 1;
@@ -174,8 +182,8 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
   output.zero_();
 
   auto count = self.numel();
-  if (count != 0) {
-    AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+  if (count != 0 && oheight != 0 && owidth != 0) {
+    AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
         self.scalar_type(), "max_unpooling2d_forward_kernel", ([&] {
           max_unpooling2d_forward_kernel<<<
               GET_BLOCKS(count),
@@ -217,9 +225,6 @@ static void max_unpooling3d_shape_check(
     IntArrayRef stride,
     IntArrayRef padding,
     const char *fn_name) {
-  int64_t oT = output_size[0];
-  int64_t oH = output_size[1];
-  int64_t oW = output_size[2];
   TORCH_CHECK(
       indices.scalar_type() == at::ScalarType::Long,
       "elements in indices should be type int64 but got: ", indices.scalar_type());
@@ -250,6 +255,19 @@ static void max_unpooling3d_shape_check(
       "strides should be greater than zero, but got stride: ",
       stride);
 
+  int64_t oT = output_size[0];
+  int64_t oH = output_size[1];
+  int64_t oW = output_size[2];
+  TORCH_CHECK(
+      oT >= 0 && oH >= 0 && oW >= 0,
+      "max_unpooling3d(): output_size must contain non-negative spatial dimensions, but got output_size=(",
+      oT,
+      ", ",
+      oH,
+      ", ",
+      oW,
+      ")");
+
   int dimw = 3;
   int dimh = 2;
   int dimt = 1;
@@ -267,7 +285,7 @@ static void max_unpooling3d_shape_check(
   if (gradOutput.defined()) {
     if (oT != gradOutput.size(dimt) || oH != gradOutput.size(dimh) ||
         oW != gradOutput.size(dimw)) {
-      AT_ERROR(
+      TORCH_CHECK(false,
           "Inconsistent gradOutput size. oT= ",
           oT,
           ", oH= ",
@@ -354,11 +372,15 @@ Tensor& max_unpooling3d_forward_out_cuda(const Tensor& self_,
     return output;
   }
 
+  if (oT == 0 || oH == 0 || oW == 0) {
+    return output;
+  }
+
   int totalZ = inputTime * inputSlices * batchSize;
   int offsetZ = 0;
   dim3 block(32, 8);
 
-  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+  AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
       self.scalar_type(), "max_unpooling3d_forward_kernel", ([&] {
         while (totalZ > 0) {
           dim3 grid(
@@ -402,8 +424,6 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
     const Tensor& indices_,
     IntArrayRef output_size,
     Tensor& grad_input) {
-  int64_t oheight = output_size[0];
-  int64_t owidth = output_size[1];
   TORCH_CHECK(grad_input.is_contiguous(), "grad_input must be contiguous");
   TORCH_CHECK(
       indices_.scalar_type() == at::ScalarType::Long,
@@ -426,6 +446,9 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
 
   TORCH_CHECK(output_size.size() == 2, "output_size must have two elements, got size: ", output_size.size());
 
+  int64_t oheight = output_size[0];
+  int64_t owidth = output_size[1];
+
   int64_t nInputCols, nInputRows, nInputPlane;
 
   int dimw = 2;
@@ -447,7 +470,7 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
   nInputRows = self.size(dimh);
 
   if (oheight != grad_output.size(dimh) || owidth != grad_output.size(dimw)) {
-    AT_ERROR(
+    TORCH_CHECK(false,
         "Inconsistent gradOutput size. output height: ",
         oheight,
         ", output width= ",
@@ -466,7 +489,7 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
     return grad_input;
   }
 
-  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+  AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
       self.scalar_type(), "max_unpooling2d_backward_kernel", ([&] {
         max_unpooling2d_backward_kernel<<<
             GET_BLOCKS(count),
@@ -505,12 +528,13 @@ at::Tensor& max_unpooling3d_backward_out_cuda(const Tensor& grad_output_,
     IntArrayRef padding,
     Tensor& grad_input) {
   TORCH_CHECK(grad_input.is_contiguous(), "grad_input must be contiguous");
-  int64_t oT = output_size[0];
-  int64_t oH = output_size[1];
-  int64_t oW = output_size[2];
 
   max_unpooling3d_shape_check(
     self_, grad_output_, indices_, output_size, stride, padding, "max_unpooling3d_backward_out_cuda()");
+
+  int64_t oT = output_size[0];
+  int64_t oH = output_size[1];
+  int64_t oW = output_size[2];
 
   int batchSize = 0;
   int inputSlices = 0;
@@ -569,7 +593,7 @@ at::Tensor& max_unpooling3d_backward_out_cuda(const Tensor& grad_output_,
 
   dim3 block(32, 8);
 
-  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+  AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
       self.scalar_type(), "max_unpooling3d_backward_kernel", ([&] {
         while (totalZ > 0) {
           dim3 grid(

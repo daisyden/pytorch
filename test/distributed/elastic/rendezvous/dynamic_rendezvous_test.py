@@ -14,17 +14,21 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from base64 import b64encode
-from datetime import datetime, timedelta
-from typing import Callable, cast, Optional, Tuple
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest import TestCase
-from unittest.mock import call, MagicMock, Mock, patch
+from unittest.mock import call, MagicMock, Mock, patch, PropertyMock
 
-from torch.distributed import Store
+import torch.distributed as dist
+from torch.distributed import HashStore, Store
 from torch.distributed.elastic.rendezvous import (
     RendezvousClosedError,
     RendezvousError,
+    RendezvousInfo,
     RendezvousParameters,
     RendezvousStateError,
+    RendezvousStoreInfo,
     RendezvousTimeoutError,
 )
 from torch.distributed.elastic.rendezvous.dynamic_rendezvous import (
@@ -47,6 +51,10 @@ from torch.distributed.elastic.rendezvous.dynamic_rendezvous import (
     RendezvousTimeout,
     Token,
 )
+
+
+TEST_PORT = 54321
+TEST_ADDR = "host"
 
 
 class CustomAssertMixin:
@@ -92,7 +100,7 @@ class RendezvousTimeoutTest(TestCase):
                     ValueError,
                     rf"^The join timeout \({join_timeout}\) must be positive.$",
                 ):
-                    timeout = RendezvousTimeout(join_timeout)
+                    RendezvousTimeout(join_timeout)
 
 
 class NodeDescTest(TestCase):
@@ -131,7 +139,7 @@ class RendezvousStateTest(TestCase):
         state = _RendezvousState()
         state.round = 1
         state.complete = True
-        state.deadline = datetime.utcnow()
+        state.deadline = datetime.now(timezone.utc)
         state.closed = True
 
         # fmt: off
@@ -157,8 +165,8 @@ class RendezvousStateTest(TestCase):
 
                     state.wait_list.add(node_waiting)
 
-                    state.last_heartbeats[node_running] = datetime.utcnow()
-                    state.last_heartbeats[node_waiting] = datetime.utcnow()
+                    state.last_heartbeats[node_running] = datetime.now(timezone.utc)
+                    state.last_heartbeats[node_waiting] = datetime.now(timezone.utc)
 
                 bits = pickle.dumps(state)
 
@@ -168,7 +176,7 @@ class RendezvousStateTest(TestCase):
 
 
 class FakeRendezvousBackend(RendezvousBackend):
-    _state: Optional[bytes]
+    _state: bytes | None
     _token: int
 
     def __init__(self) -> None:
@@ -179,15 +187,15 @@ class FakeRendezvousBackend(RendezvousBackend):
     def name(self) -> str:
         return "fake_backend"
 
-    def get_state(self) -> Optional[Tuple[bytes, Token]]:
+    def get_state(self) -> tuple[bytes, Token] | None:
         if self._token == 0:
             return None
 
         return self._state, self._token  # type: ignore[return-value]
 
     def set_state(
-        self, state: bytes, token: Optional[Token] = None
-    ) -> Optional[Tuple[bytes, Token, bool]]:
+        self, state: bytes, token: Token | None = None
+    ) -> tuple[bytes, Token, bool] | None:
         if token is None:
             token = 0
 
@@ -215,6 +223,7 @@ class FakeRendezvousBackend(RendezvousBackend):
 
 class BackendRendezvousStateHolderTest(TestCase, CustomAssertMixin):
     def setUp(self) -> None:
+        super().setUp()
         self._backend = FakeRendezvousBackend()
 
         mock_get_state = MagicMock(wraps=self._backend.get_state)
@@ -245,7 +254,7 @@ class BackendRendezvousStateHolderTest(TestCase, CustomAssertMixin):
         )
 
         mock_datetime = self._datetime_patch.start()
-        mock_datetime.utcnow.return_value = self._now
+        mock_datetime.now.return_value = self._now
 
     def tearDown(self) -> None:
         self._datetime_patch.stop()
@@ -505,7 +514,7 @@ class BackendRendezvousStateHolderTest(TestCase, CustomAssertMixin):
 
 class FakeRendezvousStateHolder(_RendezvousStateHolder):
     _state: _RendezvousState
-    _dirty: Optional[bool]
+    _dirty: bool | None
 
     def __init__(self) -> None:
         self._state = _RendezvousState()
@@ -519,7 +528,7 @@ class FakeRendezvousStateHolder(_RendezvousStateHolder):
     def state(self, value) -> None:
         self._state = value
 
-    def sync(self) -> Optional[bool]:
+    def sync(self) -> bool | None:
         self._dirty, dirty = None, self._dirty
 
         return dirty
@@ -530,6 +539,7 @@ class FakeRendezvousStateHolder(_RendezvousStateHolder):
 
 class DistributedRendezvousOpExecutorTest(TestCase, CustomAssertMixin):
     def setUp(self) -> None:
+        super().setUp()
         self._node = _NodeDesc("this_node", 1, 1)
 
         self._state_holder = FakeRendezvousStateHolder()
@@ -558,7 +568,7 @@ class DistributedRendezvousOpExecutorTest(TestCase, CustomAssertMixin):
         )
 
         mock_datetime = self._datetime_patch.start()
-        mock_datetime.utcnow.return_value = self._now
+        mock_datetime.now.return_value = self._now
 
     def tearDown(self) -> None:
         self._datetime_patch.stop()
@@ -574,7 +584,7 @@ class DistributedRendezvousOpExecutorTest(TestCase, CustomAssertMixin):
         )
 
     def _create_op_executor(
-        self, settings: Optional[RendezvousSettings] = None
+        self, settings: RendezvousSettings | None = None
     ) -> _DistributedRendezvousOpExecutor:
         self._state_holder.state = self._state
 
@@ -871,7 +881,7 @@ class AbstractTestRendezvousOp(ABC):
         )
 
         mock_datetime = self._datetime_patch.start()
-        mock_datetime.utcnow.return_value = self._now
+        mock_datetime.now.return_value = self._now
 
         self._time_patch = patch(
             "torch.distributed.elastic.rendezvous.dynamic_rendezvous.time"
@@ -1136,27 +1146,32 @@ class TestRendezvousKeepAliveOp(AbstractTestRendezvousOp, TestCase):
 
 
 class DummyStore(Store):
-    pass
+    @property
+    def port(self) -> int:
+        return TEST_PORT
 
 
 class DynamicRendezvousHandlerTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self._node = _NodeDesc("this_node", 1, 1)
 
         self._min_nodes = 1
         self._max_nodes = 1
 
-        self._join_timeout: Optional[timedelta] = None
-        self._close_timeout: Optional[timedelta] = None
-        self._heartbeat_timeout: Optional[timedelta] = None
+        self._join_timeout: timedelta | None = None
+        self._close_timeout: timedelta | None = None
+        self._heartbeat_timeout: timedelta | None = None
 
         self._keep_alive_interval = timedelta(seconds=30)
 
         self._store = DummyStore()
 
-        self._mock_store_get = MagicMock(return_value=b"dummy_value")
+        self._mock_store_get = MagicMock(return_value=b"123")
+        self._mock_store_set = MagicMock()
 
         setattr(self._store, "get", self._mock_store_get)  # noqa: B010
+        setattr(self._store, "set", self._mock_store_set)  # noqa: B010
 
         self._state_holder = FakeRendezvousStateHolder()
 
@@ -1165,6 +1180,16 @@ class DynamicRendezvousHandlerTest(TestCase):
         setattr(self._state_holder, "sync", self._mock_sync)  # noqa: B010
 
         self._state = self._state_holder.state
+
+        self._tcp_store_mock = DummyStore()
+
+        patcher = patch.object(
+            DynamicRendezvousHandler,
+            "_create_tcp_store_server",
+            return_value=self._tcp_store_mock,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _create_handler(self) -> DynamicRendezvousHandler:
         settings = RendezvousSettings(
@@ -1185,6 +1210,80 @@ class DynamicRendezvousHandlerTest(TestCase):
         return DynamicRendezvousHandler(
             self._node, settings, "dummy_backend", self._store, self._state_holder
         )
+
+    def test_share_store_creates_tcp_store(self):
+        handler = self._create_handler()
+
+        shared_store_info = RendezvousStoreInfo(TEST_ADDR, TEST_PORT)
+        with patch.object(RendezvousStoreInfo, "build", return_value=shared_store_info):
+            rdzv_info = handler.next_rendezvous()
+            self.assertEqual(rdzv_info.bootstrap_store_info.master_addr, TEST_ADDR)
+            self.assertEqual(rdzv_info.bootstrap_store_info.master_port, TEST_PORT)
+        self.assertEqual(handler._shared_tcp_store_server, self._tcp_store_mock)
+
+        rdzv_info = handler.next_rendezvous()
+        self.assertEqual(handler._shared_tcp_store_server, self._tcp_store_mock)
+
+    def test_share_store_when_tcp_store(self):
+        handler = self._create_handler()
+
+        class CustomPrefixStore(Mock):
+            def get(self, key):
+                return (
+                    TEST_ADDR.encode("utf-8")
+                    if key == "MASTER_ADDR"
+                    else bytes(str(TEST_PORT), "utf-8")
+                )
+
+            def set(self, key, value):
+                pass
+
+        with patch.object(dist, "PrefixStore", new=CustomPrefixStore):
+            handler._store = Mock(spec=dist.TCPStore)
+            type(handler._store).host = PropertyMock(return_value=TEST_ADDR)
+            type(handler._store).port = PropertyMock(return_value=TEST_PORT - 1)
+            rdzv_info = handler.next_rendezvous()
+            self.assertEqual(rdzv_info.bootstrap_store_info.master_addr, TEST_ADDR)
+            self.assertEqual(rdzv_info.bootstrap_store_info.master_port, TEST_PORT)
+            self.assertNotEqual(handler._shared_tcp_store_server, handler._store)
+
+            rdzv_info = handler.next_rendezvous()
+            self.assertEqual(rdzv_info.bootstrap_store_info.master_addr, TEST_ADDR)
+            self.assertEqual(rdzv_info.bootstrap_store_info.master_port, TEST_PORT)
+            self.assertNotEqual(handler._shared_tcp_store_server, handler._store)
+
+    def test_share_store_creates_tcp_store_when_rank_changes_to_zero(self):
+        self._max_nodes = 2
+        other_node = _NodeDesc("aaa_node", 1, 1)
+        self._state.participants[other_node] = 0
+        self._state.last_heartbeats[other_node] = datetime.now(timezone.utc)
+
+        handler = self._create_handler()
+
+        shared_store_info = RendezvousStoreInfo(TEST_ADDR, TEST_PORT)
+        with patch.object(RendezvousStoreInfo, "build", return_value=shared_store_info):
+            rdzv_info = handler.next_rendezvous()
+
+        self.assertEqual(rdzv_info.rank, 1)
+        self.assertIsNone(handler._shared_tcp_store_server)
+
+        del self._state.participants[other_node]
+        del self._state.last_heartbeats[other_node]
+        self._min_nodes = 1
+        self._max_nodes = 1
+        handler._settings = RendezvousSettings(
+            run_id="dummy_run_id",
+            min_nodes=1,
+            max_nodes=1,
+            timeout=RendezvousTimeout(),
+            keep_alive_interval=self._keep_alive_interval,
+            keep_alive_max_attempt=3,
+        )
+
+        rdzv_info = handler.next_rendezvous()
+
+        self.assertEqual(rdzv_info.rank, 0)
+        self.assertEqual(handler._shared_tcp_store_server, self._tcp_store_mock)
 
     @patch("torch.distributed.elastic.rendezvous.dynamic_rendezvous._delay")
     def test_next_rendezvous_skews_the_first_join_attempt(self, mock_delay) -> None:
@@ -1208,14 +1307,14 @@ class DynamicRendezvousHandlerTest(TestCase):
 
         handler = self._create_handler()
 
-        store, rank, world_size = handler.next_rendezvous()
+        rdzv_info = handler.next_rendezvous()
 
-        self.assertEqual(rank, 2)
-        self.assertEqual(world_size, 3)
+        self.assertEqual(rdzv_info.rank, 2)
+        self.assertEqual(rdzv_info.world_size, 3)
 
-        _ = store.get("dummy_key")
+        _ = rdzv_info.store.get("dummy_key")
 
-        self._mock_store_get.assert_called_once_with(
+        self._mock_store_get.assert_called_with(
             "torch.rendezvous.dummy_run_id.0/dummy_key"
         )
 
@@ -1349,7 +1448,7 @@ class DynamicRendezvousHandlerTest(TestCase):
     def test_keep_alive_updates_last_heartbeat(self, mock_datetime) -> None:
         now = datetime(2000, 1, 1, hour=0, minute=0)
 
-        mock_datetime.utcnow.return_value = now
+        mock_datetime.now.return_value = now
 
         self._state.last_heartbeats[self._node] = now - (self._keep_alive_interval * 2)
 
@@ -1360,7 +1459,9 @@ class DynamicRendezvousHandlerTest(TestCase):
         self.assertEqual(self._state.last_heartbeats[self._node], now)
 
     def _assert_keep_alive_swallows_rendezvous_errors(self) -> None:
-        last_heartbeat_time = datetime.utcnow() - (self._keep_alive_interval * 2)
+        last_heartbeat_time = datetime.now(timezone.utc) - (
+            self._keep_alive_interval * 2
+        )
 
         self._state.last_heartbeats[self._node] = last_heartbeat_time
 
@@ -1435,12 +1536,13 @@ class DummyRendezvousBackend(RendezvousBackend):
 
 class DynamicRendezvousHandlerFromBackendTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self._run_id = "dummy_run_id"
         self._store = DummyStore()
         self._backend = DummyRendezvousBackend()
         self._min_nodes = 3
         self._max_nodes = 6
-        self._timeout: Optional[RendezvousTimeout] = RendezvousTimeout()
+        self._timeout: RendezvousTimeout | None = RendezvousTimeout()
 
     def _create_handler(self) -> DynamicRendezvousHandler:
         return DynamicRendezvousHandler.from_backend(
@@ -1503,6 +1605,7 @@ class DynamicRendezvousHandlerFromBackendTest(TestCase):
 
 class CreateHandlerTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self._store = DummyStore()
 
         self._backend = DummyRendezvousBackend()
@@ -1552,11 +1655,28 @@ class CreateHandlerTest(TestCase):
                 create_handler(self._store, self._backend, self._params)
                 record_mock.assert_called_once()
 
+    def test_create_handler_rdzv_local_addr(self) -> None:
+        params = RendezvousParameters(
+            backend=self._backend.name,
+            endpoint="dummy_endpoint",
+            run_id="dummy_run_id",
+            min_nodes=1,
+            max_nodes=1,
+            join_timeout="50",
+            last_call_timeout="60",
+            close_timeout="70",
+            local_addr="127.0.0.2",
+        )
+        store = HashStore()
+        handler = create_handler(store, self._backend, params)
+        rdzv_info = handler.next_rendezvous()
+        self.assertEqual(rdzv_info.bootstrap_store_info.master_addr, "127.0.0.2")
+
 
 def _ignore_exception(exception_type: Exception, fn: Callable):
     try:
         fn()
-    except exception_type as e:
+    except exception_type:
         pass
 
 
@@ -1595,7 +1715,8 @@ class _CapturingThread(threading.Thread):
 
 class IntegrationTest(TestCase):
     def setUp(self) -> None:
-        self._store = DummyStore()
+        super().setUp()
+        self._store = HashStore()
         self._handlers = []
         self._backend = _InMemoryRendezvousBackend()
 
@@ -1611,7 +1732,7 @@ class IntegrationTest(TestCase):
             "min_nodes": 2,
             "max_nodes": 2,
             "join_timeout": "5",
-            "local_addr": f"address_{len(self._handlers)}",
+            "local_addr": f"127.0.0.{len(self._handlers)}",
         }
         params.update(**kwargs)
 
@@ -1631,15 +1752,15 @@ class IntegrationTest(TestCase):
         handler1_thread.start()
         handler2_thread.start()
 
-        store1, rank1, world_size1 = handler1_thread.join()
-        store2, rank2, world_size2 = handler2_thread.join()
-        self.assertEqual(store1.underlying_store, self._store)
-        self.assertEqual(store2.underlying_store, self._store)
+        rdzv_info1: RendezvousInfo = handler1_thread.join()
+        rdzv_info2: RendezvousInfo = handler2_thread.join()
+        self.assertEqual(rdzv_info1.store.underlying_store, self._store)
+        self.assertEqual(rdzv_info2.store.underlying_store, self._store)
 
-        self.assertNotEqual(rank1, rank2)
+        self.assertNotEqual(rdzv_info1.rank, rdzv_info2.rank)
 
-        self.assertEqual(world_size1, 2)
-        self.assertEqual(world_size2, 2)
+        self.assertEqual(rdzv_info1.world_size, 2)
+        self.assertEqual(rdzv_info2.world_size, 2)
 
     def test_redundancy_list(self) -> None:
         handler1 = self._create_handler(min_nodes=2, max_nodes=2)
@@ -1669,7 +1790,7 @@ class IntegrationTest(TestCase):
         state_and_token = self._backend.get_state()
         state = pickle.loads(state_and_token[0])
         addresses = [node.addr for node in state.redundancy_list]
-        self.assertListEqual(addresses, ["address_2"])
+        self.assertListEqual(addresses, ["127.0.0.2"])
 
     def test_redundancy_transition_to_wait_list_then_join_rendezvous(self) -> None:
         handler1 = self._create_handler(
@@ -1714,9 +1835,109 @@ class IntegrationTest(TestCase):
             lambda: len(pickle.loads(self._backend.get_state()[0]).wait_list) == 1
         )
 
+    def test_use_agent_store_is_true_by_default(self):
+        handler = self._create_handler(
+            min_nodes=1,
+            max_nodes=2,
+        )
+
+        self.assertTrue(handler.use_agent_store)
+
+    @patch.dict(os.environ, {"TORCH_DISABLE_SHARE_RDZV_TCP_STORE": "1"})
+    def test_use_agent_store_is_disabled(self):
+        handler = self._create_handler(
+            min_nodes=1,
+            max_nodes=2,
+        )
+
+        self.assertFalse(handler.use_agent_store)
+
+    @patch.object(dist, "PrefixStore")
+    def test_share_tcp_store_from_backend(self, prefix_store_class_mock):
+        expected_addr = "expected_address"
+        expected_port = 54231
+
+        class CustomPrefixStore(Mock):
+            def get(self, key):
+                return (
+                    expected_addr.encode("utf-8")
+                    if key == "MASTER_ADDR"
+                    else bytes(str(expected_port), "utf-8")
+                )
+
+            def set(self, key, value):
+                pass
+
+        prefix_store = CustomPrefixStore()
+        prefix_store_class_mock.return_value = prefix_store
+        tcp_store = Mock(spec=dist.TCPStore)
+        original_addr = "original_addr"
+        original_port = TEST_PORT
+        type(tcp_store).host = PropertyMock(return_value=original_addr)
+        type(tcp_store).port = PropertyMock(return_value=original_port)
+        # this will be injected
+        self._store = tcp_store
+
+        handler1 = self._create_handler(min_nodes=2, max_nodes=2)
+        handler2 = self._create_handler(min_nodes=2, max_nodes=2)
+
+        handler1_thread = _CapturingThread(target=handler1.next_rendezvous)
+        handler2_thread = _CapturingThread(target=handler2.next_rendezvous)
+
+        handler1_thread.start()
+        handler2_thread.start()
+
+        rdzv_info1: RendezvousInfo = handler1_thread.join()
+        rdzv_info2: RendezvousInfo = handler2_thread.join()
+
+        self.assertEqual(rdzv_info1.store, prefix_store)
+        self.assertEqual(rdzv_info2.store, prefix_store)
+        prefix_store_class_mock.assert_called_with(
+            "torch.rendezvous.dummy_run_id.0", tcp_store
+        )
+
+        self.assertEqual(
+            rdzv_info1.bootstrap_store_info, rdzv_info2.bootstrap_store_info
+        )
+
+        self.assertEqual(rdzv_info1.bootstrap_store_info.master_addr, expected_addr)
+        self.assertEqual(rdzv_info1.bootstrap_store_info.master_port, expected_port)
+
+    @patch.dict(os.environ, {"TORCH_DISABLE_SHARE_RDZV_TCP_STORE": "1"})
+    @patch.object(dist, "PrefixStore")
+    def test_share_tcp_store_is_disabled(self, prefix_store_class_mock):
+        prefix_store = Mock()
+        prefix_store_class_mock.return_value = prefix_store
+
+        prefix_store.set.return_value = None
+        prefix_store.get.return_value = b"123"
+        tcp_store = Mock(spec=dist.TCPStore)
+        # this will be injected
+        self._store = tcp_store
+
+        handler1 = self._create_handler(min_nodes=2, max_nodes=2)
+        handler2 = self._create_handler(min_nodes=2, max_nodes=2)
+
+        handler1_thread = _CapturingThread(target=handler1.next_rendezvous)
+        handler2_thread = _CapturingThread(target=handler2.next_rendezvous)
+
+        handler1_thread.start()
+        handler2_thread.start()
+
+        rdzv_info1: RendezvousInfo = handler1_thread.join()
+        rdzv_info2: RendezvousInfo = handler2_thread.join()
+
+        self.assertEqual(rdzv_info1.store, prefix_store)
+        self.assertEqual(rdzv_info2.store, prefix_store)
+        prefix_store_class_mock.assert_called_with(
+            "torch.rendezvous.dummy_run_id.0", self._store
+        )
+        self.assertEqual(rdzv_info1.bootstrap_store_info.master_port, 123)
+        self.assertEqual(rdzv_info2.bootstrap_store_info.master_port, 123)
+
 
 class _InMemoryRendezvousBackend(RendezvousBackend):
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._state = None
         self._token = None

@@ -6,7 +6,6 @@ import warnings
 
 import torch
 import torch.autograd.functional as autogradF
-
 from torch.testing._internal.common_cuda import TEST_CUDA
 from torch.testing._internal.common_utils import (
     gradcheck,
@@ -14,17 +13,19 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
     run_tests,
+    skipIfTorchDynamo,
     subtest,
     TestCase,
 )
 from torch.testing._internal.logging_tensor import LoggingTensor
+
 
 # Utilities for parametrizing the tensor constructors used in autograd tests
 #
 # TODO: maybe move somewhere so other tests can also use
 #
 # NB: Not all factory functions included. A complete(?) list can be found here:
-#     https://pytorch.org/cppdocs/notes/tensor_creation.html
+#     https://docs.pytorch.org/docs/2.9/torch.html#creation-ops
 base_ctors_dict = {
     "ones": torch.ones,
     "zeros": torch.zeros,
@@ -670,13 +671,15 @@ class TestAutogradFunctional(TestCase):
 
         x = ctors.randn(3)
         with warnings.catch_warnings(record=True) as wa:
-            result = api(foo, x, vectorize=True)
+            api(foo, x, vectorize=True)
         self.assertEqual(len(wa), 0)
 
+    @skipIfTorchDynamo(msg="https://github.com/pytorch/pytorch/issues/153707")
     @base_and_logging_tensor
     def test_jacobian_vectorize_raises_no_warnings(self, ctors):
         return self._test_vectorize_raises_no_warnings(autogradF.jacobian, ctors)
 
+    @skipIfTorchDynamo(msg="https://github.com/pytorch/pytorch/issues/153644")
     @base_and_logging_tensor
     def test_hessian_vectorize_raises_no_warnings(self, ctors):
         return self._test_vectorize_raises_no_warnings(autogradF.hessian, ctors)
@@ -762,7 +765,7 @@ class TestAutogradFunctional(TestCase):
 
         inp = ctors.rand(4)
         with self.assertRaisesRegex(RuntimeError, "not supported together"):
-            res = autogradF.jacobian(foo, inp, strict=True, vectorize=True)
+            autogradF.jacobian(foo, inp, strict=True, vectorize=True)
 
     @base_and_logging_tensor
     def test_jacobian_no_grad(self, ctors):
@@ -1122,7 +1125,7 @@ class TestAutogradFunctional(TestCase):
 
         inp = ctors.rand(4)
         with self.assertRaisesRegex(RuntimeError, "not supported together"):
-            res = autogradF.hessian(foo, inp, strict=True, vectorize=True)
+            autogradF.hessian(foo, inp, strict=True, vectorize=True)
 
     @base_and_logging_tensor
     def test_hessian_no_grad(self, ctors):

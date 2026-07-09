@@ -2,26 +2,22 @@
 #include <torch/csrc/jit/ir/alias_analysis.h>
 #include <torch/csrc/jit/ir/ir_views.h>
 #include <torch/csrc/jit/jit_log.h>
-#include <torch/csrc/jit/passes/dead_code_elimination.h>
-#include <torch/csrc/jit/passes/peephole.h>
 #include <torch/csrc/jit/passes/peephole_list_idioms.h>
 #include <torch/csrc/jit/passes/value_refinement_utils.h>
-#include <torch/csrc/jit/runtime/graph_executor.h>
 #include <torch/csrc/jit/runtime/slice_indices_adjust.h>
 #include <limits>
 #include <utility>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
-static c10::optional<size_t> normalizeIndex(int64_t index, size_t len) {
+static std::optional<size_t> normalizeIndex(int64_t index, size_t len) {
   if (index < 0) {
     index = index + len;
   }
   if (index >= 0 && index < static_cast<int64_t>(len)) {
     return index;
   } else {
-    return c10::nullopt;
+    return std::nullopt;
   }
 }
 
@@ -127,16 +123,16 @@ struct ListLenRefiner {
     }
     active_refinements_.pop_back();
     return block_refinements;
-  };
+  }
 
-  c10::optional<int64_t> tryFindRefinement(Value* v) {
+  std::optional<int64_t> tryFindRefinement(Value* v) {
     for (const auto& ref : active_refinements_) {
       auto maybe_refinement = ref->find(v);
       if (maybe_refinement != ref->end()) {
         return maybe_refinement->second;
       }
     }
-    return c10::nullopt;
+    return std::nullopt;
   }
 
   std::shared_ptr<Graph> graph_;
@@ -199,8 +195,8 @@ struct PeepholeOptimizeListIdiomsImpl {
     auto step_val = toIValue(slice_node->input(3));
 
     // All args must be constant to apply this optimization.
-    if (start_val == c10::nullopt || end_val == c10::nullopt ||
-        step_val == c10::nullopt) {
+    if (start_val == std::nullopt || end_val == std::nullopt ||
+        step_val == std::nullopt) {
       return false;
     }
 
@@ -325,5 +321,4 @@ bool PeepholeOptimizeListIdioms(
   return opt.run();
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

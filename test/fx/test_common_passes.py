@@ -6,11 +6,10 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.graph_module import GraphModule
 from torch.fx.passes.dialect.common.cse_pass import CSEPass
-
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
-    run_tests,
+    raise_on_run_directly,
     TestCase,
 )
 
@@ -99,7 +98,10 @@ class TestCommonPass(TestCase):
 
         res = P(traced_m)
         modified_m = res.graph_module
-        assert isinstance(modified_m, GraphModule)
+        if not isinstance(modified_m, GraphModule):
+            raise AssertionError(
+                f"Expected modified_m to be GraphModule, got {type(modified_m)}"
+            )
 
         inp_copy = inp.clone()
         expected = f(inp)
@@ -119,7 +121,10 @@ class TestCommonPass(TestCase):
 
         res = P(traced_m)
         modified_m = res.graph_module
-        assert isinstance(modified_m, GraphModule)
+        if not isinstance(modified_m, GraphModule):
+            raise AssertionError(
+                f"Expected modified_m to be GraphModule, got {type(modified_m)}"
+            )
 
         inp_copy = inp.clone()
         expected = f(inp, device)
@@ -129,4 +134,4 @@ class TestCommonPass(TestCase):
 
 
 if __name__ == "__main__":
-    run_tests()
+    raise_on_run_directly("test/test_fx.py")

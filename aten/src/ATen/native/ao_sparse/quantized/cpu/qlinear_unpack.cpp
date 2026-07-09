@@ -15,9 +15,8 @@
 #include <ATen/ops/from_blob.h>
 #endif
 
-namespace ao {
-namespace sparse {
-int register_linear_params();
+namespace ao::sparse {
+
 
 #ifdef USE_FBGEMM
 
@@ -47,7 +46,7 @@ LinearPackedSerializationType PackedLinearWeight::unpack() {
         scales,
         zero_points,
         0, // The output channel axis is 0
-        device(c10::kCPU).dtype(c10::kQInt8));
+        at::device(c10::kCPU).dtype(c10::kQInt8));
   }
 
   int8_t* weight_ptr_int8 =
@@ -66,8 +65,8 @@ LinearPackedSerializationType PackedLinearWeight::unpack() {
 #ifdef USE_PYTORCH_QNNPACK
 
 LinearPackedSerializationType PackedLinearWeightQnnp::unpack() {
-  const int64_t N = static_cast<int64_t>(output_channels_);
-  const int64_t K = static_cast<int64_t>(input_channels_);
+  const int64_t N = output_channels_;
+  const int64_t K = input_channels_;
 
   float* w_scales_ptr = w_scales_.data_ptr<float>();
 
@@ -101,7 +100,7 @@ LinearPackedSerializationType PackedLinearWeightQnnp::unpack() {
         scales,
         zero_points,
         0, // The output channel axis is 0
-        device(c10::kCPU).dtype(c10::kQInt8));
+        at::device(c10::kCPU).dtype(c10::kQInt8));
   }
 
   int8_t* weight_ptr_int8 =
@@ -139,4 +138,4 @@ TORCH_LIBRARY_IMPL(sparse, CatchAll, m) {
       TORCH_FN(QLinearUnpackWeightInt8::run));
 }
 }  // namespace
-}}  // namespace ao::sparse
+}  // namespace ao::sparse

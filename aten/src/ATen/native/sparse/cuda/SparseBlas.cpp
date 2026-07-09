@@ -244,14 +244,14 @@ Tensor& addmv_out_sparse_compressed_cuda(
       return result.zero_();
     } else {
       return at::mul_out(
-          const_cast<Tensor&>(result),
+          result,
           self,
           at::native::scalar_tensor(
               beta,
               self.scalar_type(),
-              c10::nullopt /* layout */,
+              std::nullopt /* layout */,
               at::kCPU,
-              c10::nullopt /* pin_memory */));
+              std::nullopt /* pin_memory */));
     }
   }
 

@@ -25,7 +25,11 @@ static PyObject* THCPStream_pynew(
   int64_t stream_id = 0;
   int64_t device_index = 0;
   int64_t device_type = 0;
-  uint64_t stream_ptr = 0;
+  // stream_ptr is parsed as a Python object (default Py_None) rather than a
+  // raw uint64_t so we can distinguish "kwarg omitted" from "kwarg explicitly
+  // set to 0". The legacy "|iLLLK" format collapsed those two cases and
+  // caused ExternalStream(0) to land in getStreamFromPool.
+  PyObject* stream_ptr_obj = Py_None;
 
   // NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
   constexpr const char* kwlist[] = {
@@ -38,15 +42,28 @@ static PyObject* THCPStream_pynew(
   if (!PyArg_ParseTupleAndKeywords(
           args,
           kwargs,
-          "|iLLLK",
+          "|iLLLO",
           // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
           const_cast<char**>(kwlist),
           &priority,
           &stream_id,
           &device_index,
           &device_type,
-          &stream_ptr)) {
+          &stream_ptr_obj)) {
     return nullptr;
+  }
+
+  const bool stream_ptr_provided = (stream_ptr_obj != Py_None);
+  uint64_t stream_ptr = 0;
+  if (stream_ptr_provided) {
+    TORCH_CHECK(
+        PyLong_Check(stream_ptr_obj),
+        "stream_ptr must be an int or None, got ",
+        Py_TYPE(stream_ptr_obj)->tp_name);
+    stream_ptr = PyLong_AsUnsignedLongLong(stream_ptr_obj);
+    if (PyErr_Occurred()) {
+      return nullptr;
+    }
   }
 
   THPObjectPtr ptr(type->tp_alloc(type, 0));
@@ -54,23 +71,24 @@ static PyObject* THCPStream_pynew(
     return nullptr;
   }
 
-  if (stream_ptr) {
+  if (stream_ptr_provided) {
     TORCH_CHECK(
-        priority == 0, "Priority was explicitly set for a external stream")
+        priority == 0, "Priority was explicitly set for an external stream")
   }
   at::cuda::CUDAStream stream = (stream_id || device_index || device_type)
       ? at::cuda::CUDAStream::unpack3(
             stream_id,
             static_cast<c10::DeviceIndex>(device_index),
             static_cast<c10::DeviceType>(device_type))
-      : stream_ptr ? at::cuda::getStreamFromExternal(
-                         // NOLINTNEXTLINE(performance-no-int-to-ptr)
-                         reinterpret_cast<cudaStream_t>(stream_ptr),
-                         current_device)
-                   : at::cuda::getStreamFromPool(priority);
+      : stream_ptr_provided ? at::cuda::getStreamFromExternal(
+                                  // NOLINTNEXTLINE(performance-no-int-to-ptr)
+                                  reinterpret_cast<cudaStream_t>(stream_ptr),
+                                  current_device)
+                            : at::cuda::getStreamFromPool(priority);
 
   THCPStream* self = (THCPStream*)ptr.get();
   self->stream_id = static_cast<int64_t>(stream.id());
+  // NOLINTNEXTLINE(bugprone-signed-char-misuse)
   self->device_index = static_cast<int64_t>(stream.device_index());
   self->device_type = static_cast<int64_t>(stream.device_type());
   new (&self->cuda_stream) at::cuda::CUDAStream(stream);
@@ -81,13 +99,7 @@ static PyObject* THCPStream_pynew(
 
 static void THCPStream_dealloc(THCPStream* self) {
   self->cuda_stream.~CUDAStream();
-  Py_TYPE(self)->tp_free((PyObject*)self);
-}
-
-static PyObject* THCPStream_get_device(THCPStream* self, void* unused) {
-  HANDLE_TH_ERRORS
-  return THPDevice_New(self->cuda_stream.device());
-  END_HANDLE_TH_ERRORS
+  THPStream_dealloc_common(reinterpret_cast<THPStream*>(self));
 }
 
 static PyObject* THCPStream_get_cuda_stream(THCPStream* self, void* unused) {
@@ -162,7 +174,8 @@ static PyMethodDef THCPStream_methods[] = {
     {nullptr}};
 
 PyTypeObject THCPStreamType = {
-    PyVarObject_HEAD_INIT(nullptr, 0) "torch._C._CudaStreamBase", /* tp_name */
+    PyVarObject_HEAD_INIT(nullptr, 0)
+    "torch._C._CudaStreamBase", /* tp_name */
     sizeof(THCPStream), /* tp_basicsize */
     0, /* tp_itemsize */
     (destructor)THCPStream_dealloc, /* tp_dealloc */
@@ -185,7 +198,7 @@ PyTypeObject THCPStreamType = {
     nullptr, /* tp_traverse */
     nullptr, /* tp_clear */
     nullptr, /* tp_richcompare */
-    0, /* tp_weaklistoffset */
+    0, /* tp_weaklistoffset (inherited from THPStreamType via tp_base) */
     nullptr, /* tp_iter */
     nullptr, /* tp_iternext */
     THCPStream_methods, /* tp_methods */

@@ -26,6 +26,7 @@ c_stderr = ctypes.c_void_p.in_dll(libc, "stderr")
 
 class RedirectsTest(unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.test_dir = tempfile.mkdtemp(prefix=f"{self.__class__.__name__}_")
 
     def tearDown(self):
@@ -138,3 +139,10 @@ class RedirectsTest(unittest.TestCase):
             libc.printf(bytes(f"c:{i}\n", "utf-8"))
 
         self._redirect_large_buffer(c_print)
+
+
+if __name__ == "__main__":
+    raise RuntimeError(
+        "This test is not currently used and should be "
+        "enabled in discover_tests.py if required."
+    )

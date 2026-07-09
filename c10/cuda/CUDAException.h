@@ -35,13 +35,14 @@ class C10_CUDA_API CUDAError : public c10::Error {
         static_cast<uint32_t>(__LINE__),                            \
         true);                                                      \
   } while (0)
+// backwards compat due to hipify v2 changes, for extension projects
+#define C10_HIP_CHECK C10_CUDA_CHECK
 
 #define C10_CUDA_CHECK_WARN(EXPR)                              \
   do {                                                         \
     const cudaError_t __err = EXPR;                            \
     if (C10_UNLIKELY(__err != cudaSuccess)) {                  \
-      auto error_unused C10_UNUSED = cudaGetLastError();       \
-      (void)error_unused;                                      \
+      [[maybe_unused]] auto error_unused = cudaGetLastError(); \
       TORCH_WARN("CUDA warning: ", cudaGetErrorString(__err)); \
     }                                                          \
   } while (0)
@@ -50,20 +51,18 @@ class C10_CUDA_API CUDAError : public c10::Error {
 #define C10_CUDA_ERROR_HANDLED(EXPR) EXPR
 
 // Intentionally ignore a CUDA error
-#define C10_CUDA_IGNORE_ERROR(EXPR)                             \
-  do {                                                          \
-    const cudaError_t __err = EXPR;                             \
-    if (C10_UNLIKELY(__err != cudaSuccess)) {                   \
-      cudaError_t error_unused C10_UNUSED = cudaGetLastError(); \
-      (void)error_unused;                                       \
-    }                                                           \
+#define C10_CUDA_IGNORE_ERROR(EXPR)                                   \
+  do {                                                                \
+    const cudaError_t __err = EXPR;                                   \
+    if (C10_UNLIKELY(__err != cudaSuccess)) {                         \
+      [[maybe_unused]] cudaError_t error_unused = cudaGetLastError(); \
+    }                                                                 \
   } while (0)
 
 // Clear the last CUDA error
-#define C10_CUDA_CLEAR_ERROR()                                \
-  do {                                                        \
-    cudaError_t error_unused C10_UNUSED = cudaGetLastError(); \
-    (void)error_unused;                                       \
+#define C10_CUDA_CLEAR_ERROR()                                      \
+  do {                                                              \
+    [[maybe_unused]] cudaError_t error_unused = cudaGetLastError(); \
   } while (0)
 
 // This should be used directly after every kernel launch to ensure
@@ -94,7 +93,7 @@ C10_CUDA_API void c10_cuda_check_implementation(
     const int32_t err,
     const char* filename,
     const char* function_name,
-    const int line_number,
+    const uint32_t line_number,
     const bool include_device_assertions);
 
 } // namespace c10::cuda

@@ -4,25 +4,14 @@
 #include <ATen/core/ivalue.h>
 #include <c10/util/ApproximateClock.h>
 #include <c10/util/irange.h>
-#include <torch/csrc/autograd/profiler.h>
 #include <torch/csrc/jit/frontend/tracer.h>
 
 #include <algorithm>
-#include <bitset>
-#include <cctype>
 #include <cmath>
-#include <exception>
 #include <fstream>
 #include <iostream>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <ostream>
 #include <stdexcept>
 #include <string>
-#include <typeinfo>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,7 +24,8 @@ RegisterOperators reg({
         prim::profile,
         [](const Node* node) -> Operation {
           return [](Stack& stack) {
-            AT_ERROR(
+            TORCH_CHECK(
+                false,
                 "Must be lowered to Interpreter's PROFILE instruction"); // NOLINT
           };
         },
@@ -44,7 +34,8 @@ RegisterOperators reg({
         prim::profile_ivalue,
         [](const Node* node) -> Operation {
           return [](Stack& stack) {
-            AT_ERROR(
+            TORCH_CHECK(
+                false,
                 "Must be lowered to Interpreter's PROFILE instruction"); // NOLINT
           };
         },
@@ -163,8 +154,7 @@ RegisterOperators reg({
         "aten::_grad_sum_to_size(Tensor(a) self, int[]? size) -> Tensor(a)",
         [](Stack& stack) {
           RECORD_FUNCTION("_grad_sum_to_size", std::vector<c10::IValue>());
-          IValue self, size;
-          pop(stack, self, size);
+          auto [self, size] = pop<IValue, IValue>(stack);
           if (size.isNone()) {
             push(stack, std::move(self));
           } else {
@@ -188,7 +178,7 @@ RegisterOperators reg({
         prim::TypeCheck /* (...)  -> (..., bool) */,
         [](const Node* /* node */) -> Operation {
           return [](Stack& /* stack */) {
-            AT_ERROR("prim::TypeCheck not yet implemented"); // NOLINT
+            TORCH_CHECK(false, "prim::TypeCheck not yet implemented"); // NOLINT
           };
         },
         aliasAnalysisSpecialCase()),
@@ -196,19 +186,22 @@ RegisterOperators reg({
         prim::FallbackGraph,
         [](const Node* node) -> Operation {
           return [](Stack& stack) {
-            AT_ERROR(
+            TORCH_CHECK(
+                false,
                 "Must be converted to prim::FunctionCall by replaceFallbackGraphWithFallbackFunction"); // NOLINT
           };
         },
         aliasAnalysisSpecialCase()),
     Operator(
         "prim::Guard(Tensor(a) t) -> Tensor(a)",
-        [](Stack& stack) { AT_ERROR("Should be replaced by prim::BailOut"); },
+        [](Stack& stack) {
+          TORCH_CHECK(false, "Should be replaced by prim::BailOut");
+        },
         aliasAnalysisFromSchema()),
     Operator(
         "prim::BailOut(...) -> Tensor(a)",
         [](Stack& /* stack */) {
-          AT_ERROR("prim::BailOut not yet implemented"); // NOLINT
+          TORCH_CHECK(false, "prim::BailOut not yet implemented"); // NOLINT
         },
         aliasAnalysisFromSchema()),
     Operator(
@@ -379,7 +372,7 @@ RegisterOperators logging_operators(
          },
          aliasAnalysisFromSchema())});
 
-C10_UNUSED void hashValue(Stack& stack) {
+[[maybe_unused]] void hashValue(Stack& stack) {
   auto value = pop(stack);
   push(stack, value.hash());
 }
@@ -427,16 +420,16 @@ at::Tensor interpolate(
     const IValue& size,
     const IValue& scale_factors,
     const std::string& mode,
-    c10::optional<bool> align_corners,
-    c10::optional<bool> recompute_scale_factor) {
+    std::optional<bool> align_corners,
+    std::optional<bool> recompute_scale_factor) {
   if ((mode == "nearest" || mode == "area")) {
-    if (align_corners != c10::nullopt) {
+    if (align_corners != std::nullopt) {
       throw std::runtime_error(
           "align_corners option can only be set with the "
           "interpolating modes: linear | bilinear | bicubic | trilinear");
     }
   } else {
-    if (align_corners == c10::nullopt) {
+    if (align_corners == std::nullopt) {
       TORCH_WARN(
           "Default upsampling behavior when mode=",
           mode,
@@ -451,7 +444,7 @@ at::Tensor interpolate(
   double scale_factors_2 = -1.0;
   double scale_factors_3 = -1.0;
 
-  if (!scale_factors.isNone() && recompute_scale_factor == c10::nullopt) {
+  if (!scale_factors.isNone() && recompute_scale_factor == std::nullopt) {
     recompute_scale_factor = true;
     bool warn_recompute_scale_factor = false;
 
@@ -510,7 +503,7 @@ at::Tensor interpolate(
     return at::upsample_nearest1d(
         input,
         _output_size(input, 1, size, scale_factors),
-        c10::make_optional(scale_factors_1));
+        std::make_optional(scale_factors_1));
   if (input_dim == dim2d && mode == "nearest")
     return at::upsample_nearest2d(
         input,
@@ -538,7 +531,7 @@ at::Tensor interpolate(
         input,
         _output_size(input, 1, size, scale_factors),
         *align_corners,
-        c10::make_optional(scale_factors_1));
+        std::make_optional(scale_factors_1));
   if (input_dim == dim1d && mode == "bilinear")
     throw std::runtime_error("Got 3D input, but bilinear mode needs 4D input");
   if (input_dim == dim1d && mode == "bicubic")
@@ -578,7 +571,8 @@ at::Tensor interpolate(
         scale_factors_2,
         scale_factors_3);
 
-  AT_ERROR(
+  TORCH_CHECK(
+      false,
       "Input Error: Only 3D, 4D and 5D input Tensors supported",
       " (got ",
       input_dim,
@@ -634,29 +628,22 @@ IValue convert_scale_factor_to_double(const IValue& int_ivalue) {
     std::stringstream ss;
     ss << "Expecting optional int or int list arg for scale factor, got"
        << int_ivalue;
-    throw std::runtime_error(ss.str());
+    throw std::runtime_error(std::move(ss).str());
   }
   return scale_factor_double;
 }
 
 void upsample_nearest_op(Stack& stack) {
-  at::Tensor input;
-  IValue size;
-  IValue scale_factor_int;
-  pop(stack, input, size, scale_factor_int);
+  auto [input, size, scale_factor_int] = pop<at::Tensor, IValue, IValue>(stack);
   IValue scale_factor_double = convert_scale_factor_to_double(scale_factor_int);
   at::Tensor res = interpolate(
-      input, size, scale_factor_double, "nearest", c10::nullopt, c10::nullopt);
+      input, size, scale_factor_double, "nearest", std::nullopt, std::nullopt);
   push(stack, std::move(res));
 }
 
 void upsample_op(Stack& stack) {
-  at::Tensor input;
-  IValue size;
-  IValue scale_factor_int;
-  std::string mode;
-  IValue align_corners;
-  pop(stack, input, size, scale_factor_int, mode, align_corners);
+  auto [input, size, scale_factor_int, mode, align_corners] =
+      pop<at::Tensor, IValue, IValue, std::string, IValue>(stack);
   IValue scale_factor_double = convert_scale_factor_to_double(scale_factor_int);
   at::Tensor res = interpolate(
       input,
@@ -664,18 +651,15 @@ void upsample_op(Stack& stack) {
       scale_factor_double,
       mode,
       align_corners.toOptional<bool>(),
-      c10::nullopt);
+      std::nullopt);
   push(stack, std::move(res));
 }
 
 void upsample_bilinear_op(Stack& stack) {
-  at::Tensor input;
-  IValue size;
-  IValue scale_factor_int;
-  pop(stack, input, size, scale_factor_int);
+  auto [input, size, scale_factor_int] = pop<at::Tensor, IValue, IValue>(stack);
   IValue scale_factor_double = convert_scale_factor_to_double(scale_factor_int);
   at::Tensor res = interpolate(
-      input, size, scale_factor_double, "bilinear", true, c10::nullopt);
+      input, size, scale_factor_double, "bilinear", true, std::nullopt);
   push(stack, std::move(res));
 }
 

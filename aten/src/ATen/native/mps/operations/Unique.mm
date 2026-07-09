@@ -1,20 +1,32 @@
 //  Copyright © 2022 Apple Inc.
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/Resize.h>
-#include <ATen/native/mps/MPSGraphVenturaOps.h>
 #include <ATen/native/mps/OperationUtils.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
 #else
+#include <ATen/ops/_unique.h>
 #include <ATen/ops/_unique2.h>
 #include <ATen/ops/_unique2_native.h>
+#include <ATen/ops/_unique_native.h>
+#include <ATen/ops/arange.h>
+#include <ATen/ops/argsort.h>
+#include <ATen/ops/cat.h>
+#include <ATen/ops/cumsum.h>
+#include <ATen/ops/full.h>
+#include <ATen/ops/masked_select.h>
+#include <ATen/ops/nonzero.h>
+#include <ATen/ops/ones.h>
+#include <ATen/ops/ones_like.h>
 #include <ATen/ops/slice.h>
 #include <ATen/ops/unique_consecutive.h>
 #include <ATen/ops/unique_consecutive_native.h>
 #include <ATen/ops/unique_dim_consecutive.h>
 #include <ATen/ops/unique_dim_consecutive_native.h>
+#include <ATen/ops/unique_dim_native.h>
+#include <ATen/ops/zeros.h>
 #endif
 
 namespace at::native {
@@ -34,10 +46,10 @@ static std::string getUniqueKey(const ScalarType& dtype,
                                 const bool return_inverse,
                                 const bool return_counts,
                                 const bool consecutive,
-                                c10::optional<int64_t> dimOpt) {
+                                std::optional<int64_t> dimOpt) {
   return "_unique2_mps:" + getMPSTypeString(dtype) + "[" + getArrayRefString(base_shape) + "]:[" +
-      (dimOpt.has_value() ? to_string(dimOpt.value()) : "None") + "]:[" + to_string(return_inverse) + "]:[" +
-      to_string(return_counts) + "]:[" + to_string(consecutive) + "]";
+      (dimOpt.has_value() ? std::to_string(dimOpt.value()) : "None") + "]:[" + std::to_string(return_inverse) + "]:[" +
+      std::to_string(return_counts) + "]:[" + std::to_string(consecutive) + "]";
 }
 
 // dim arg not supported when non consecutive, ie sorted
@@ -46,7 +58,7 @@ static std::array<MPSGraphTensor*, 4> buildUniqueGraph(const Tensor& self,
                                                        const bool return_inverse,
                                                        const bool return_counts,
                                                        const bool consecutive,
-                                                       c10::optional<int64_t> dimOpt) {
+                                                       std::optional<int64_t> dimOpt) {
   int64_t dim = dimOpt.has_value() ? maybe_wrap_dim(dimOpt.value(), self.dim()) : 0;
 
   MPSGraph* graph = uniqueGraph->graph();
@@ -182,9 +194,9 @@ static UniqueCachedGraph* getUniqueGraph(const Tensor& self,
                                          const bool return_inverse,
                                          const bool return_counts,
                                          const bool consecutive,
-                                         c10::optional<int64_t> dim) {
+                                         std::optional<int64_t> dim) {
   @autoreleasepool {
-    string key = getUniqueKey(self.scalar_type(), self.sizes(), return_inverse, return_counts, consecutive, dim);
+    std::string key = getUniqueKey(self.scalar_type(), self.sizes(), return_inverse, return_counts, consecutive, dim);
     return LookUpOrCreateCachedGraph<UniqueCachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
       newCachedGraph->inputTensor_ = mpsGraphRankedPlaceHolder(mpsGraph, getMPSScalarType(self), getMPSShape(self));
       auto outputTensors = buildUniqueGraph(self, newCachedGraph, return_inverse, return_counts, consecutive, dim);
@@ -234,7 +246,7 @@ static std::tuple<Tensor, Tensor, Tensor> _unique_impl_mps(const Tensor& self,
                                                            const bool return_inverse,
                                                            const bool return_counts,
                                                            const bool consecutive,
-                                                           c10::optional<int64_t> dimOpt) {
+                                                           std::optional<int64_t> dimOpt) {
   const Tensor& input = self.contiguous();
 
   // get flat output size
@@ -255,27 +267,30 @@ static std::tuple<Tensor, Tensor, Tensor> _unique_impl_mps(const Tensor& self,
   if (!return_counts)
     countsShape = {};
 
-  Tensor output = at::empty(outputShape, input.scalar_type(), c10::nullopt, kMPS, c10::nullopt, c10::nullopt);
+  Tensor output = at::empty(outputShape, input.scalar_type(), std::nullopt, kMPS, std::nullopt, std::nullopt);
   Tensor inverse_indices =
-      at::empty(inverseIndicesShape, ScalarType::Long, c10::nullopt, kMPS, c10::nullopt, c10::nullopt);
-  Tensor counts = at::empty(countsShape, ScalarType::Long, c10::nullopt, kMPS, c10::nullopt, c10::nullopt);
-  Tensor length = at::empty({1}, ScalarType::Int, c10::nullopt, kMPS, c10::nullopt, c10::nullopt);
+      at::empty(inverseIndicesShape, ScalarType::Long, std::nullopt, kMPS, std::nullopt, std::nullopt);
+  Tensor counts = at::empty(countsShape, ScalarType::Long, std::nullopt, kMPS, std::nullopt, std::nullopt);
+  Tensor length = at::empty({1}, ScalarType::Int, std::nullopt, kMPS, std::nullopt, std::nullopt);
 
   if (input.numel() == 0) {
-    return std::make_tuple(output, inverse_indices, counts);
+    return std::make_tuple(std::move(output), std::move(inverse_indices), std::move(counts));
   }
 
-  mps::UniqueCachedGraph* uniqueGraph = mps::getUniqueGraph(input, return_inverse, return_counts, consecutive, dimOpt);
-  mps::runUniqueGraph(uniqueGraph, input, output, inverse_indices, counts, length, return_inverse, return_counts);
+  @autoreleasepool {
+    mps::UniqueCachedGraph* uniqueGraph =
+        mps::getUniqueGraph(input, return_inverse, return_counts, consecutive, dimOpt);
+    mps::runUniqueGraph(uniqueGraph, input, output, inverse_indices, counts, length, return_inverse, return_counts);
+  }
 
   int64_t lengthScalar = length.item<int64_t>() + 1; // length actually holds max index, add 1
-  if (output.sizes().size() != 0) {
+  if (!output.sizes().empty()) {
     output = at::slice(output, dim, 0, lengthScalar);
   }
   if (return_counts)
     counts = at::slice(counts, 0, 0, lengthScalar);
 
-  return std::make_tuple(output, inverse_indices, counts);
+  return std::make_tuple(std::move(output), std::move(inverse_indices), std::move(counts));
 }
 
 static std::tuple<Tensor, Tensor, Tensor> castToMPS(std::tuple<Tensor, Tensor, Tensor> out) {
@@ -285,13 +300,7 @@ static std::tuple<Tensor, Tensor, Tensor> castToMPS(std::tuple<Tensor, Tensor, T
 std::tuple<Tensor, Tensor, Tensor> unique_consecutive_mps(const Tensor& self,
                                                           const bool return_inverse,
                                                           const bool return_counts,
-                                                          c10::optional<int64_t> dim) {
-  if (!is_macos_13_or_newer()) {
-    TORCH_WARN_ONCE("MPS: unique_consecutive op is supported natively starting from macOS 13.0. ",
-                    "Falling back on CPU. This may have performance implications.");
-    return castToMPS(at::unique_consecutive(self.to("cpu"), return_inverse, return_counts, dim));
-  }
-
+                                                          std::optional<int64_t> dim) {
   return _unique_impl_mps(self, return_inverse, return_counts, true, dim);
 }
 
@@ -299,26 +308,100 @@ std::tuple<Tensor, Tensor, Tensor> unique_dim_consecutive_mps(const Tensor& self
                                                               int64_t dim,
                                                               const bool return_inverse,
                                                               const bool return_counts) {
-  if (!is_macos_13_or_newer()) {
-    TORCH_WARN_ONCE("MPS: unique_dim_consecutive op is supported natively starting from macOS 13.0. ",
-                    "Falling back on CPU. This may have performance implications.");
-    return castToMPS(at::unique_dim_consecutive(self.to("cpu"), dim, return_inverse, return_counts));
-  }
-
-  return _unique_impl_mps(self, return_inverse, return_counts, true, c10::make_optional((int64_t)dim));
+  return _unique_impl_mps(self, return_inverse, return_counts, true, dim);
 }
 
 std::tuple<Tensor, Tensor, Tensor> _unique2_mps(const Tensor& self,
                                                 const bool sorted,
                                                 const bool return_inverse,
                                                 const bool return_counts) {
-  if (!is_macos_13_or_newer()) {
-    TORCH_WARN_ONCE("MPS: _unique2 op is supported natively starting from macOS 13.0. ",
-                    "Falling back on CPU. This may have performance implications.");
-    return castToMPS(at::_unique2(self.to("cpu"), sorted, return_inverse, return_counts));
+  return _unique_impl_mps(self, return_inverse, return_counts, false, std::nullopt);
+}
+
+std::tuple<Tensor, Tensor> _unique_mps(const Tensor& self, const bool sorted, const bool return_inverse) {
+  auto [output, inverse_indices, _] = _unique_impl_mps(self, return_inverse, false, false, std::nullopt);
+  return std::make_tuple(std::move(output), std::move(inverse_indices));
+}
+
+static Tensor lexsort_rows_perm_mps(const Tensor& mat_2d) {
+  const auto rows = mat_2d.size(0), cols = mat_2d.size(1);
+  if (rows <= 1 || cols == 0) {
+    return arange(rows, mat_2d.options().dtype(kLong));
   }
 
-  return _unique_impl_mps(self, return_inverse, return_counts, false, c10::nullopt);
+  auto perm = arange(rows, mat_2d.options().dtype(kLong));
+  for (auto c = cols - 1; c >= 0; --c) {
+    auto keys = mat_2d.select(1, c).index_select(0, perm);
+    const auto idx = argsort(keys, /*stable=*/true, /*dim=*/0, /*descending=*/false);
+    perm = perm.index_select(0, idx);
+  }
+  return perm;
+}
+
+static std::tuple<Tensor, Tensor, Tensor> unique_dim_sorted_mps_impl(const Tensor& self,
+                                                                     int64_t dim,
+                                                                     bool return_inverse,
+                                                                     bool return_counts) {
+  dim = maybe_wrap_dim(dim, self.dim());
+
+  auto sizes = self.sizes().vec();
+  auto num_zero_dims = std::count(sizes.begin(), sizes.end(), (int64_t)0);
+  if (self.size(dim) == 0) {
+    auto output = at::empty(sizes, self.options());
+    auto inverse_indices = at::empty({0}, self.options().dtype(kLong));
+    auto counts = at::empty({0}, self.options().dtype(kLong));
+    return {output, inverse_indices, counts};
+  }
+
+  auto transposed = self.moveaxis(dim, 0);
+  auto orig_sizes = transposed.sizes().vec();
+  auto rows = transposed.size(0);
+  auto input_flat = transposed.contiguous().view({rows, -1});
+
+  auto perm = lexsort_rows_perm_mps(input_flat);
+  auto input_sorted = input_flat.index_select(0, perm);
+
+  Tensor is_unique = at::zeros({rows}, self.options().dtype(kBool));
+  if (rows > 0) {
+    is_unique.narrow(0, 0, 1).fill_(true);
+  }
+  if (rows > 1) {
+    auto a = input_sorted.narrow(0, 1, rows - 1);
+    auto b = input_sorted.narrow(0, 0, rows - 1);
+    auto row_changed = a.ne(b).any(1);
+    is_unique.narrow(0, 1, rows - 1).copy_(row_changed);
+  }
+
+  auto unique_pos = nonzero(is_unique).squeeze(1);
+  auto group_id = cumsum(is_unique.to(kLong), 0).sub(1);
+
+  auto unique_rows_2d = input_sorted.index_select(0, unique_pos);
+
+  Tensor inverse_indices = empty({0}, self.options().dtype(kLong));
+  if (return_inverse) {
+    inverse_indices = empty({rows}, self.options().dtype(kLong));
+    inverse_indices.index_copy_(0, perm, group_id);
+  }
+
+  Tensor counts = empty({0}, self.options().dtype(kLong));
+  if (return_counts) {
+    const auto num_unique = unique_pos.size(0);
+    counts = zeros({num_unique}, self.options().dtype(kLong));
+    counts.scatter_add_(0, group_id, ones_like(group_id, group_id.options().dtype(kLong)));
+  }
+
+  orig_sizes[0] = unique_rows_2d.size(0);
+  auto output = unique_rows_2d.view(orig_sizes).moveaxis(0, dim);
+
+  return std::make_tuple(std::move(output), std::move(inverse_indices), std::move(counts));
+}
+
+std::tuple<Tensor, Tensor, Tensor> unique_dim_mps(const Tensor& self,
+                                                  int64_t dim,
+                                                  const bool /*sorted*/,
+                                                  const bool return_inverse,
+                                                  const bool return_counts) {
+  return unique_dim_sorted_mps_impl(self, dim, return_inverse, return_counts);
 }
 
 } // namespace at::native
