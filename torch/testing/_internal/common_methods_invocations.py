@@ -18203,7 +18203,8 @@ op_db: list[OpInfo] = [
         supports_fwgrad_bwgrad=False,
         supports_forward_ad=False,
         check_batched_forward_grad=False,
-        decorators=[skipCUDAIf(not PLATFORM_SUPPORTS_FLASH_ATTENTION, "This platform doesn't support Flash Attention")],
+        # torch-xpu-ops/issues/2344
+        decorators=[skipXPU, skipCUDAIf(not PLATFORM_SUPPORTS_FLASH_ATTENTION, "This platform doesn't support Flash Attention")],
         skips=(
             # Checking the scalar value of the philox seed and offset
             DecorateInfo(unittest.expectedFailure, 'TestCompositeCompliance', 'test_operator', device_type='cuda'),
@@ -18880,12 +18881,13 @@ op_db: list[OpInfo] = [
                DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_out'),
                DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_out_warning'),
                # Could not run 'aten::narrow_copy.out' with arguments from the 'CUDA' backend
+               # torch-xpu-ops/issues/2309
                DecorateInfo(unittest.expectedFailure, 'TestMeta', 'test_meta_outplace',
-                            device_type='cuda'),
+                            device_type=('cuda', 'xpu'),
                DecorateInfo(unittest.expectedFailure, 'TestMeta', 'test_dispatch_meta_outplace',
-                            device_type='cuda'),
+                            device_type=('cuda', 'xpu')),
                DecorateInfo(unittest.expectedFailure, 'TestMeta', 'test_dispatch_symbolic_meta_outplace',
-                            device_type='cuda'),
+                            device_type=('cuda', 'xpu'),
                DecorateInfo(unittest.expectedFailure, 'TestMeta', 'test_dispatch_symbolic_meta_outplace_all_strides'),
            )),
     OpInfo('view_copy',
