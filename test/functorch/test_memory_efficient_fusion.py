@@ -15,7 +15,7 @@ from torch.nn import functional as F
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
-HAS_CUDA = torch.cuda.is_available()
+HAS_GPU = torch.cuda.is_available() or torch.xpu.is_available()
 
 
 def _num_args(fn: Callable):
@@ -89,16 +89,13 @@ def hard_mish(x):
 #         return x * self.weight.view(v_shape).to(dtype=x_dtype) + self.bias.view(v_shape).to(dtype=x_dtype)
 
 
-# device = "cuda"
-# dtype = torch.float
-
 # evo_norm = EvoNorm2dS0(2048)
 # evo_norm_inp = [(128, 2048, 8, 8)]
 
 
 def run_and_compare_activation(self, fn, inps):
     with torch.jit.fuser("fuser1"):
-        device = "cuda"
+        device = "cuda" if torch.cuda.is_available() else "xpu"
         dtype = torch.float
         if isinstance(fn, nn.Module):
             fn = fn.to(device=device, dtype=dtype)
@@ -124,7 +121,7 @@ def run_and_compare_activation(self, fn, inps):
             self.assertEqual(ref_arg.grad, res_arg.grad)
 
 
-@unittest.skipIf(not torch.cuda.is_available(), "CUDA is unavailable")
+@unittest.skipIf(not HAS_GPU, "CUDA or XPU is unavailable")
 class TestMemoryEfficientOpAuthoring(TestCase):
     def test_gelu_bias(self):
         run_and_compare_activation(self, gelu_bias, [(1024,), (1024,)])
