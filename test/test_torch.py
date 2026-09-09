@@ -199,8 +199,8 @@ class TestTorchDeviceType(TestCase):
 
     # For testing in64 support in upsample_nearest3d
     @skipIfRocmArch(MI200_ARCH)
-    @onlyCUDA
-    @largeTensorTest('56GB', device='cuda')
+    @onlyAccelerator
+    @largeTensorTest('56GB')
     @dtypes(torch.bfloat16)
     @unittest.skipIf(IS_JETSON, "Large tensor tests are too large for Jetson.")
     @decorateIf(unittest.expectedFailure, lambda params: isRocmArchAnyOf(MI200_ARCH))
@@ -481,12 +481,12 @@ class TestTorchDeviceType(TestCase):
         # This is OK, it changes the meta storage size without allocating
         s0.resize_(10)
 
-    @onlyCUDA
-    def test_module_share_memory(self):
+    @onlyAccelerator
+    def test_module_share_memory(self, device):
         # Test fix for issue #80733
         # See https://github.com/pytorch/pytorch/issues/80733
         model = torch.nn.Linear(3, 1)
-        _model_cuda = model.to('cuda')
+        _model_dev = model.to(device)
         model.share_memory()
 
     @dtypes(torch.float32, torch.complex64)
@@ -1102,7 +1102,7 @@ class TestTorchDeviceType(TestCase):
         out.backward(torch.ones_like(out).transpose(-2, -1))
 
     # TODO: this test should be in test_nn.py
-    @onlyCUDA
+    @onlyAccelerator
     @largeTensorTest('12GB')
     def test_conv_transposed_large(self, device):
         # ConvTranspose3d works for large input tensors (gh-32866)
@@ -1820,7 +1820,7 @@ class TestTorchDeviceType(TestCase):
             torch.device(device).type == 'cuda')
 
     @skipIfTorchInductor("https://github.com/pytorch/pytorch/issues/113707")
-    @onlyCUDA
+    @onlyAccelerator
     def test_deterministic_cumsum(self, device):
         test_cases = [
             # size, dim
@@ -1858,10 +1858,10 @@ class TestTorchDeviceType(TestCase):
             res_cpu = input.cpu().cumsum(dim)
             self.assertEqual(res0, res_cpu, atol=1e-3, rtol=1e-2)
 
-    @onlyCUDA
+    @onlyAccelerator
     @largeTensorTest('49GB')
     def test_cumsum_64bit_indexing(self, device):
-        b = torch.ones(2 * 4096 * 8, 100000, dtype=torch.float, device='cuda')
+        b = torch.ones(2 * 4096 * 8, 100000, dtype=torch.float, device=device)
         b /= 100000
         d = b.cumsum(dim=-1)
         chunk = 2**30 // b.shape[-1]
@@ -1872,7 +1872,7 @@ class TestTorchDeviceType(TestCase):
         self.assertEqual(b[0, :], d[0, :], atol=3e-5, rtol=3e-5)
         self.assertEqual(b[-1, :], d[-1, :], atol=3e-5, rtol=3e-5)
 
-    @onlyCUDA
+    @onlyAccelerator
     @largeTensorTest('48GB')
     def test_cumsum_outer_dim_64bit_indexing(self, device):
         x = torch.zeros(309504, 1, 16384, device=device)
@@ -2147,7 +2147,7 @@ class TestTorchDeviceType(TestCase):
         result = original.scatter(0, null_index, null_arr)
         self.assertEqual(result, original, atol=0, rtol=0)
 
-    @onlyCUDA
+    @onlyAccelerator
     @skipIfTorchInductor("FIXME")
     def test_sync_warning(self, device):
 
@@ -2334,7 +2334,7 @@ class TestTorchDeviceType(TestCase):
         with self.assertRaises(RuntimeError):
             torch.empty((1,), device=device, dtype=dtype).exponential_(-0.5)
 
-    @onlyCUDA
+    @onlyAccelerator
     @dtypes(torch.half, torch.float)
     def test_exponential_no_zero(self, device, dtype):
         # naively, 0 in exponential can be generated with probability 2^-24
@@ -2532,7 +2532,7 @@ class TestTorchDeviceType(TestCase):
                 self.assertTrue(res.statistic < 0.1)
 
     @slowTest
-    @onlyCUDA
+    @onlyAccelerator
     @dtypes(torch.bfloat16, torch.float32)
     def test_cauchy_no_inf(self, device, dtype):
         # torch.float16 will have `inf` because of its smaller range.
@@ -2654,7 +2654,7 @@ class TestTorchDeviceType(TestCase):
                             expected = self._brute_cdist(x, y, p=p)
                             self.assertEqual(expected, actual)
 
-    @onlyCUDA
+    @onlyAccelerator
     def test_cdist_cuda_backward(self, device):
         for l1 in [1, 511, 513]:
             for l2 in [1, 511, 513]:
@@ -3296,10 +3296,10 @@ class TestTorchDeviceType(TestCase):
 
     @unittest.skipIf(IS_FBCODE and IS_REMOTE_GPU, "sandcastle OOM with current tpx gpu/re configuration")
     @unittest.skipIf(IS_JETSON, "psutil issue for largeTensorTest. Too large for Jetson.")
-    @onlyCUDA
+    @onlyAccelerator
     @dtypes(torch.half)  # only small dtype not to get oom
     @largeTensorTest('25GB', device='cpu')
-    @largeTensorTest('4GB', device='cuda')
+    @largeTensorTest('4GB')
     def test_large_cumsum(self, device, dtype):
         # initialization to avoid overflow and half caveats
         x = torch.empty(2**30 + 200, device=device, dtype=dtype)
@@ -3308,10 +3308,10 @@ class TestTorchDeviceType(TestCase):
         x[2::3] = 1
         self._test_large_cum_fn_helper(x, lambda x: torch.cumsum(x, 0))
 
-    @onlyCUDA
+    @onlyAccelerator
     @dtypes(torch.half)  # only small dtype not to get oom
     @largeTensorTest('25GB', device='cpu')
-    @largeTensorTest('4GB', device='cuda')
+    @largeTensorTest('4GB')
     @unittest.skipIf(IS_JETSON, "psutil issue for largeTensorTest. Too large for Jetson.")
     def test_large_cumprod(self, device, dtype):
         # initialization to avoid overflow and half caveats
@@ -3403,7 +3403,7 @@ class TestTorchDeviceType(TestCase):
             out2 = out1.to(torch.float)
             self.assertEqual(out2, out1, atol=0, rtol=0, exact_dtype=False)
 
-    @onlyCUDA
+    @onlyAccelerator
     @dtypes(torch.bfloat16, torch.half)
     def test_reduced_type_float_copy_special_values(self, device, dtype):
         special = torch.tensor(
@@ -3559,7 +3559,7 @@ class TestTorchDeviceType(TestCase):
             out = torch.addcmul(a, b, c, value=-1)
             self.assertTrue(not (out.isnan() or out.isinf()))
 
-    @onlyCUDA
+    @onlyAccelerator
     def test_addcmul_cuda_errors_with_cpu_scalars(self, device):
         # Logic is dtype agnostic, so dtype isn't tested
         alpha = 0.5
@@ -3831,7 +3831,7 @@ class TestTorchDeviceType(TestCase):
             input.scatter_(0, index, src, reduce=operation)
             self.assertEqual(input, result, msg=lambda msg: f"{msg}\nresult: {result} input: {input} method: {str(operation)}")
 
-    @onlyCUDA
+    @onlyAccelerator
     @dtypes(*complex_types())
     def test_scatter_reduce_multiply_unsupported_dtypes(self, device, dtype):
         height = 2
@@ -3944,7 +3944,7 @@ class TestTorchDeviceType(TestCase):
 
     # FIXME: find a test suite for the masked scatter operator
     #   test_scatter_gather_ops or test_masked_ops?
-    @onlyCUDA
+    @onlyAccelerator
     @largeTensorTest('30GB')
     def test_masked_scatter_large_tensor(self, device):
         t_cpu = torch.empty(2**31 + 1, dtype=torch.bool).random_()
@@ -4279,9 +4279,9 @@ class TestTorchDeviceType(TestCase):
 
     # FIXME: find a test suite for the pdist operator
     @unittest.skipIf(IS_FBCODE and IS_REMOTE_GPU, "sandcastle OOM with current tpx gpu/re configuration")
-    @onlyCUDA
+    @onlyAccelerator
     @largeTensorTest('32GB', device='cpu')
-    @largeTensorTest('5GB', device='cuda')
+    @largeTensorTest('5GB')
     def test_pdist_norm_large(self, device):
         # use dim0>=46342 for forward, see:
         # https://github.com/pytorch/pytorch/issues/30583
@@ -4298,7 +4298,7 @@ class TestTorchDeviceType(TestCase):
     # launch past 2^24 outputs failed with hipErrorInvalidConfiguration. n=5794 is
     # the first pdist size over that line; test_pdist_norm_large also covers it but
     # needs 32 GB of host RAM, so it does not run in CI (see #168868).
-    @onlyCUDA
+    @onlyAccelerator
     @parametrize("n", [5793, 5794, 8000])
     def test_pdist_large_grid(self, device, n):
         x = torch.randn(n, 1, dtype=torch.float32)
@@ -4306,7 +4306,7 @@ class TestTorchDeviceType(TestCase):
         self.assertEqual(actual, torch.pdist(x, p=2), atol=1e-4, rtol=1e-4)
 
     # p != 2 keeps cdist off the matrix-multiply path and on the kernel under test.
-    @onlyCUDA
+    @onlyAccelerator
     @parametrize("r1, r2", [(4096, 4096), (256, 65536)])
     def test_cdist_large_grid(self, device, r1, r2):
         x1 = torch.randn(r1, 2, dtype=torch.float32)
@@ -4448,7 +4448,7 @@ class TestTorchDeviceType(TestCase):
         with self.assertRaisesRegex(RuntimeError, 'unsupported operation'):
             ind.index_add_(0, ind.clone(), ind)
 
-    @onlyCUDA
+    @onlyAccelerator
     @skipCUDAIfNotRocm  # This UT throws an OOM error on CUDA
     def test_index_add_large_inputs(self, device):
         D = 6144
@@ -4612,7 +4612,7 @@ class TestTorchDeviceType(TestCase):
             ind.scatter_(0, ind, ind.clone())
 
     # FIXME: move to test distributions
-    @onlyCUDA
+    @onlyAccelerator
     def test_multinomial_device_constrain(self, device):
         x = torch.empty(3, device="cpu")
         y = torch.empty(3, device=device)
@@ -5078,7 +5078,7 @@ class TestTorchDeviceType(TestCase):
             for x in xs:
                 _test_helper(x, op, unary=True)
 
-    @onlyCUDA
+    @onlyAccelerator
     @unittest.skipIf(PYTORCH_CUDA_MEMCHECK, "is_pinned uses failure to detect pointer property")
     @skipIfTorchDynamo("NotImplementedError: PrimTorch does not support pinned memory")
     def test_pin_memory_from_constructor(self, device):
@@ -5420,7 +5420,7 @@ class TestTorchDeviceType(TestCase):
         self.assertEqual(sample_indices.size(1), n_sample, msg="wrong number of samples")
 
     # FIXME: move to test distributions
-    @onlyCUDA
+    @onlyAccelerator
     @dtypes(torch.float, torch.double, torch.half)
     def test_multinomial_deterministic(self, device, dtype):
         gen = torch.Generator(device=device)
@@ -5623,7 +5623,7 @@ class TestTorchDeviceType(TestCase):
             self._test_memory_format_transformations(
                 device, get_generator(mf, shape, torch.float64), get_fn('float'), mf, default_is_preserve=True)
 
-    @onlyCUDA
+    @onlyAccelerator
     def test_memory_format_cpu_and_cuda_ops(self, device):
         def get_generator(memory_format, shape):
             def input_generator_fn(device):
@@ -5633,8 +5633,8 @@ class TestTorchDeviceType(TestCase):
         def transformation_cpu_fn(tensor, **kwargs):
             return tensor.cpu(**kwargs)
 
-        def transformation_cuda_fn(tensor, **kwargs):
-            return tensor.cuda(**kwargs)
+        def transformation_dev_fn(tensor, **kwargs):
+            return tensor.to(device, **kwargs)
 
         formats_shapes = (
             (torch.channels_last, (4, 3, 8, 8)),
@@ -5642,9 +5642,9 @@ class TestTorchDeviceType(TestCase):
 
         for mf, shape in formats_shapes:
             self._test_memory_format_transformations(
-                'cuda', get_generator(mf, shape), transformation_cpu_fn, mf, default_is_preserve=True)
+                device, get_generator(mf, shape), transformation_cpu_fn, mf, default_is_preserve=True)
             self._test_memory_format_transformations(
-                'cpu', get_generator(mf, shape), transformation_cuda_fn, mf, default_is_preserve=True)
+                'cpu', get_generator(mf, shape), transformation_dev_fn, mf, default_is_preserve=True)
 
     # FIXME: move to test_serialization
     @onlyNativeDeviceTypes
