@@ -918,8 +918,9 @@ meta_dispatch_device_expected_failures['xpu'] = {
     # exp(-|x|) for the backward pass while CUDA and XPU recompute it and
     # return an empty tensor. A meta tensor has no device, so the decomp
     # cannot pick the right shape. Same divergence as the 'cuda' entry above.
-    aten.log_sigmoid_forward.default: {bf16, },
-    aten.log_sigmoid_forward.output : {bf16, },  # aten::log_sigmoid_forward.output
+    # intel/torch-xpu-ops#5020
+    aten.log_sigmoid_forward.default: {bf16, f16, f64, f32},
+    aten.log_sigmoid_forward.output : {bf16, f16, f64, f32},  # aten::log_sigmoid_forward.output
 }
 
 meta_dispatch_device_skips['cpu'] = {
