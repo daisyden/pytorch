@@ -34,7 +34,10 @@ from torch.testing._internal.common_utils import (
     skipIfNoCuteDSL,
     TEST_CUTEDSL,
 )
-from torch.testing._internal.inductor_utils import HAS_CUDA_AND_TRITON
+from torch.testing._internal.inductor_utils import (
+    HAS_CUDA_AND_TRITON,
+    HAS_XPU_AND_TRITON,
+)
 from torch.testing._internal.opinfo.core import (
     BinaryUfuncInfo,
     generate_elementwise_binary_with_scalar_samples,
@@ -194,6 +197,9 @@ class StrictNumericsConfigTest(TestCase):
         )
 
 
+# CUDA-only: asserts NVIDIA libdevice strict-pointwise lowerings (e.g. sigmoid ->
+# libdevice.exp + libdevice.rcp_rn) that XPU does not emit. Tracked by
+# https://github.com/intel/torch-xpu-ops/issues/6007
 @unittest.skipUnless(
     HAS_CUDA_AND_TRITON and torch.version.hip is None,
     "requires NVIDIA CUDA and Triton",
@@ -395,6 +401,9 @@ class StrictNumericsCompileTest(TestCase):
         self.assertIn("div_rn", "\n".join(codes))
 
 
+# CUDA-only: requires tl.ReductionOrdering (inner-tree reductions), unsupported
+# on the XPU Triton backend (has_triton_reduction_ordering() is False). Tracked
+# by https://github.com/intel/torch-xpu-ops/issues/6007
 @unittest.skipUnless(
     HAS_CUDA_AND_TRITON
     and torch.version.hip is None
@@ -692,6 +701,9 @@ class StrictNumericsTest(TestCase):
         self.assertIn("tensor_descriptor" if kind == "split" else "tl.store", code)
 
 
+# StrictNumericsCompileTest and StrictNumericsTest stay CUDA-only pending XPU
+# support for the features tracked by
+# https://github.com/intel/torch-xpu-ops/issues/6007
 instantiate_device_type_tests(StrictNumericsCompileTest, globals(), only_for="cuda")
 instantiate_device_type_tests(StrictNumericsTest, globals(), only_for="cuda")
 
@@ -1156,13 +1168,168 @@ NONFLOAT_XFAIL = frozenset(
     }
 )
 
+# XPU ledgers. XPU's Triton backend uses a different math library than CUDA's
+# libdevice, so the set of ops that diverge from eager under strict numerics is
+# different. These were measured on the local Intel GPU stack (preferred dtype,
+# matching the CUDA sweeps) and are gated by HAS_XPU_AND_TRITON below.
+POINTWISE_XFAIL_XPU = frozenset(
+    {
+        ("__rmod__", "float32"),
+        ("__rpow__", "float32"),
+        ("__rsub__", "float32"),
+        ("acos", "float32"),
+        ("acosh", "float32"),
+        ("add", "float32"),
+        ("addcmul", "float32"),
+        ("angle", "float32"),
+        ("atan", "float32"),
+        ("atan2", "float32"),
+        ("bfloat16", "float32"),
+        ("byte", "float32"),
+        ("clamp", "float32"),
+        ("clamp_max", "float32"),
+        ("clamp_min", "float32"),
+        ("div_floor_rounding", "float32"),
+        ("erf", "float32"),
+        ("erfinv", "float32"),
+        ("exp", "float32"),
+        ("exp2", "float32"),
+        ("expm1", "float32"),
+        ("float_power", "float32"),
+        ("floor_divide", "float32"),
+        ("fmax", "float32"),
+        ("fmin", "float32"),
+        ("fmod", "float32"),
+        ("frexp", "float32"),
+        ("hypot", "float32"),
+        ("i0", "float32"),
+        ("ldexp", "float32"),
+        ("lerp", "float32"),
+        ("lgamma", "float32"),
+        ("log1p", "float32"),
+        ("log2", "float32"),
+        ("logaddexp", "float32"),
+        ("logaddexp2", "float32"),
+        ("masked_logaddexp", "float32"),
+        ("max_binary", "float32"),
+        ("maximum", "float32"),
+        ("min_binary", "float32"),
+        ("minimum", "float32"),
+        ("mvlgamma_mvlgamma_p_1", "float32"),
+        ("mvlgamma_mvlgamma_p_3", "float32"),
+        ("mvlgamma_mvlgamma_p_5", "float32"),
+        ("nextafter", "float32"),
+        ("nn_functional_celu", "float32"),
+        ("nn_functional_elu", "float32"),
+        ("nn_functional_gelu", "float32"),
+        ("nn_functional_hardsigmoid", "float32"),
+        ("nn_functional_hardtanh", "float32"),
+        ("nn_functional_logsigmoid", "float32"),
+        ("nn_functional_mish", "float32"),
+        ("nn_functional_relu", "float32"),
+        ("nn_functional_relu6", "float32"),
+        ("nn_functional_selu", "float32"),
+        ("nn_functional_silu", "float32"),
+        ("nn_functional_softplus", "float32"),
+        ("nn_functional_tanhshrink", "float32"),
+        ("pow", "float32"),
+        ("remainder", "float32"),
+        ("round_decimals_3", "float32"),
+        ("round_decimals_neg_3", "float32"),
+        ("rsub", "float32"),
+        ("sigmoid", "float32"),
+        ("special_bessel_j0", "float32"),
+        ("special_bessel_j1", "float32"),
+        ("special_bessel_y0", "float32"),
+        ("special_bessel_y1", "float32"),
+        ("special_erfcx", "float32"),
+        ("special_i1", "float32"),
+        ("special_log_ndtr", "float32"),
+        ("special_modified_bessel_i0", "float32"),
+        ("special_modified_bessel_i1", "float32"),
+        ("special_ndtr", "float32"),
+        ("special_xlog1py", "float32"),
+        ("sub", "float32"),
+        ("tan", "float32"),
+        ("tanh", "float32"),
+        ("xlogy", "float32"),
+    }
+)
+
+BACKWARD_XFAIL_XPU = frozenset(
+    {
+        ("__rdiv__", "float32"),
+        ("__rmod__", "float32"),
+        ("__rpow__", "float32"),
+        ("acos", "float32"),
+        ("addcdiv", "float32"),
+        ("atanh", "float32"),
+        ("erf", "float32"),
+        ("erfc", "float32"),
+        ("erfinv", "float32"),
+        ("exp", "float32"),
+        ("exp2", "float32"),
+        ("expm1", "float32"),
+        ("hypot", "float32"),
+        ("i0", "float32"),
+        ("ldexp", "float32"),
+        ("lerp", "float32"),
+        ("logaddexp", "float32"),
+        ("logaddexp2", "float32"),
+        ("logit", "float32"),
+        ("masked_logaddexp", "float32"),
+        ("mvlgamma_mvlgamma_p_1", "float32"),
+        ("mvlgamma_mvlgamma_p_3", "float32"),
+        ("mvlgamma_mvlgamma_p_5", "float32"),
+        ("nn_functional_celu", "float32"),
+        ("nn_functional_elu", "float32"),
+        ("nn_functional_gelu", "float32"),
+        ("nn_functional_hardswish", "float32"),
+        ("nn_functional_logsigmoid", "float32"),
+        ("nn_functional_mish", "float32"),
+        ("nn_functional_selu", "float32"),
+        ("nn_functional_silu", "float32"),
+        ("nn_functional_softplus", "float32"),
+        ("nn_functional_tanhshrink", "float32"),
+        ("pow", "float32"),
+        ("remainder", "float32"),
+        ("sigmoid", "float32"),
+        ("sinc", "float32"),
+        ("special_bessel_j0", "float32"),
+        ("special_bessel_j1", "float32"),
+        ("special_bessel_y0", "float32"),
+        ("special_bessel_y1", "float32"),
+        ("special_erfcx", "float32"),
+        ("special_i1", "float32"),
+        ("special_log_ndtr", "float32"),
+        ("special_modified_bessel_i0", "float32"),
+        ("special_modified_bessel_i1", "float32"),
+        ("special_ndtr", "float32"),
+        ("special_ndtri", "float32"),
+        ("special_xlog1py", "float32"),
+        ("tan", "float32"),
+        ("tanh", "float32"),
+        ("xlogy", "float32"),
+    }
+)
+
+NONFLOAT_XFAIL_XPU = frozenset()
+
+
+def _xfail_for(device, cuda_xfail, xpu_xfail, cuda_name, xpu_name):
+    if "xpu" in str(device):
+        return xpu_xfail, xpu_name
+    return cuda_xfail, cuda_name
+
 
 class _strict_ops(ops):
-    def __init__(self, op_list, xfails):
+    def __init__(self, op_list, xfails, xfails_xpu):
         super().__init__(op_list, allowed_dtypes=POINTWISE_DTYPES)
         self.xfails = xfails
+        self.xfails_xpu = xfails_xpu
 
     def _parametrize_test(self, test, generic_cls, device_cls):
+        xfails = self.xfails_xpu if device_cls.device_type == "xpu" else self.xfails
         for case in super()._parametrize_test(test, generic_cls, device_cls):
             params = case[2]
             op, dtype = params["op"], params["dtype"]
@@ -1171,7 +1338,7 @@ class _strict_ops(ops):
             if (
                 ALL_SAMPLES
                 or dtype == preferred
-                or (_op_id(op), _dtype_label(dtype)) in self.xfails
+                or (_op_id(op), _dtype_label(dtype)) in xfails
             ):
                 yield case
 
@@ -1236,15 +1403,17 @@ _LEDGER_ARCH = LazyVal(lambda: bool(IS_SM89 or IS_SM90 or IS_SM100))
 
 
 @unittest.skipUnless(
-    HAS_CUDA_AND_TRITON and torch.version.hip is None and _LEDGER_ARCH,
-    "requires CUDA and Triton on sm_89, sm_90 or sm_100 (the ledger's measured arches)",
+    (HAS_CUDA_AND_TRITON and torch.version.hip is None and _LEDGER_ARCH)
+    or HAS_XPU_AND_TRITON,
+    "requires CUDA and Triton on sm_89, sm_90 or sm_100 (the ledger's measured "
+    "arches), or XPU and Triton",
 )
 class PointwiseStrictNumericsTest(TestCase):
     def setUp(self):
         super().setUp()
         torch.manual_seed(0)
         # Release large reference-input allocations between concurrent tests.
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     @dtypes(torch.float16, torch.bfloat16)
     def test_keyword_input_grads(self, device, dtype):
@@ -1445,19 +1614,29 @@ class PointwiseStrictNumericsTest(TestCase):
                 f"on (source, index, shape, kwargs, kind): {mismatches}.",
             )
 
-    @_strict_ops(POINTWISE_OPS, POINTWISE_XFAIL)
+    @_strict_ops(POINTWISE_OPS, POINTWISE_XFAIL, POINTWISE_XFAIL_XPU)
     def test_pointwise_bitwise(self, device, dtype, op):
-        mismatches = self._sweep(device, op, dtype, POINTWISE_STRICT_CFG)
-        self._assert_ledger(
-            mismatches, op, dtype, "forward", POINTWISE_XFAIL, "POINTWISE_XFAIL"
+        xfail, xfail_name = _xfail_for(
+            device,
+            POINTWISE_XFAIL,
+            POINTWISE_XFAIL_XPU,
+            "POINTWISE_XFAIL",
+            "POINTWISE_XFAIL_XPU",
         )
+        mismatches = self._sweep(device, op, dtype, POINTWISE_STRICT_CFG)
+        self._assert_ledger(mismatches, op, dtype, "forward", xfail, xfail_name)
 
     @ops(NONFLOAT_INPUT_OPS, allowed_dtypes=_NONFLOAT_DTYPES)
     def test_pointwise_nonfloat(self, device, dtype, op):
-        mismatches = self._sweep(device, op, dtype, POINTWISE_STRICT_CFG)
-        self._assert_ledger(
-            mismatches, op, dtype, "nonfloat", NONFLOAT_XFAIL, "NONFLOAT_XFAIL"
+        xfail, xfail_name = _xfail_for(
+            device,
+            NONFLOAT_XFAIL,
+            NONFLOAT_XFAIL_XPU,
+            "NONFLOAT_XFAIL",
+            "NONFLOAT_XFAIL_XPU",
         )
+        mismatches = self._sweep(device, op, dtype, POINTWISE_STRICT_CFG)
+        self._assert_ledger(mismatches, op, dtype, "nonfloat", xfail, xfail_name)
 
     def _input_grads(self, call_fn, inp, args, kwargs, grad_output):
         leaves = []
@@ -1562,15 +1741,22 @@ class PointwiseStrictNumericsTest(TestCase):
             self._require_kernel(tested, "no differentiable sample")
         return mismatches
 
-    @_strict_ops(BACKWARD_OPS, BACKWARD_XFAIL)
+    @_strict_ops(BACKWARD_OPS, BACKWARD_XFAIL, BACKWARD_XFAIL_XPU)
     def test_pointwise_backward(self, device, dtype, op):
-        mismatches = self._sweep_backward(device, op, dtype, POINTWISE_STRICT_CFG)
-        self._assert_ledger(
-            mismatches, op, dtype, "backward", BACKWARD_XFAIL, "BACKWARD_XFAIL"
+        xfail, xfail_name = _xfail_for(
+            device,
+            BACKWARD_XFAIL,
+            BACKWARD_XFAIL_XPU,
+            "BACKWARD_XFAIL",
+            "BACKWARD_XFAIL_XPU",
         )
+        mismatches = self._sweep_backward(device, op, dtype, POINTWISE_STRICT_CFG)
+        self._assert_ledger(mismatches, op, dtype, "backward", xfail, xfail_name)
 
 
-instantiate_device_type_tests(PointwiseStrictNumericsTest, globals(), only_for="cuda")
+instantiate_device_type_tests(
+    PointwiseStrictNumericsTest, globals(), only_for=("cuda", "xpu"), allow_xpu=True
+)
 
 if __name__ == "__main__":
     run_tests()
