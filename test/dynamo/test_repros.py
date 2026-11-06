@@ -6598,7 +6598,7 @@ def forward(self, L_x_ : torch.Tensor, s77 : torch.SymInt, s27 : torch.SymInt):
         self.assertEqual(actual_str, expected_str)
 
     @unittest.skipIf(
-        not SM70OrLater,
+        torch.cuda.is_available() and not SM70OrLater,
         "Triton only supports devices of CUDA capability >= 7.0",
     )
     def test_add_complex_conj(self):
