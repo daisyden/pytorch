@@ -16,6 +16,7 @@ from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
     largeTensorTest,
     onlyAccelerator,
+    onlyCUDA,
     skipCUDAIf,
     skipMeta,
     skipXPUIf,
@@ -1850,8 +1851,6 @@ class TestEmbeddingNNDeviceType(NNTestCase):
     def test_embedding_bag_device(self, device, dtypes):
         if IS_JETSON and torch.bfloat16 in dtypes and device == "cpu":
             self.skipTest("bfloat16 not supported with Jetson cpu")
-        if dtypes[2] == torch.float64 and "xpu" in device:
-            self.skipTest("https://github.com/intel/torch-xpu-ops/issues/2295")
         with set_default_dtype(torch.double):
             self._test_EmbeddingBag(
                 device,
@@ -2011,6 +2010,7 @@ class TestEmbeddingNNCudaOnly(NNTestCase):
     hw_classification = HardwareClassification.CUDA
 
     # https://github.com/pytorch/pytorch/issues/192445
+    @onlyCUDA
     @slowTest
     @dtypes(torch.int32, torch.int64)
     @parametrize_test("target", ("indices", "offset2bag"))
@@ -2074,7 +2074,8 @@ torch.cuda.synchronize()
         )
 
     # https://github.com/pytorch/pytorch/issues/192445
-    @largeTensorTest("5GB", device="cuda")
+    @skipXPUIf(True, "https://github.com/intel/torch-xpu-ops/issues/6075")
+    @largeTensorTest("5GB")
     def test_embedding_bag_per_sample_weights_large_index(self, device):
         large_index = 2**31
         weight = torch.empty((large_index + 1, 1), device=device, dtype=torch.float16)
@@ -2160,7 +2161,9 @@ torch.cuda.synchronize()
 
 
 instantiate_device_type_tests(TestEmbeddingNNDeviceType, globals(), allow_xpu=True)
-instantiate_device_type_tests(TestEmbeddingNNCudaOnly, globals(), only_for="cuda")
+instantiate_device_type_tests(
+    TestEmbeddingNNCudaOnly, globals(), only_for=("cuda", "xpu"), allow_xpu=True
+)
 instantiate_parametrized_tests(TestEmbeddingNN)
 
 if __name__ == "__main__":
