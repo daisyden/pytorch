@@ -2003,6 +2003,8 @@ class TestUnaryUfuncsCUDADevice(TestCase):
         # subnormal conversion path gets wrong source register for odd elements
         # in the 8-wide unrolled vectorized_elementwise_kernel.
         # e4m3fn subnormals: |x| < 2^-6
+        if self.device_type == "xpu" and dtype == torch.float16:
+            self.skipTest("https://github.com/intel/torch-xpu-ops/issues/6088")
         torch.manual_seed(0)
         N = 2**20
         x = (torch.randn(N, dtype=dtype, device=device) * 1e-3).clamp(-448, 448)
@@ -2014,6 +2016,8 @@ class TestUnaryUfuncsCUDADevice(TestCase):
     def test_fp8_e5m2_conversion_subnormals(self, device, dtype):
         # Same regression test for e5m2.
         # e5m2 subnormals: |x| < 2^-14
+        if self.device_type == "xpu" and dtype == torch.float16:
+            self.skipTest("https://github.com/intel/torch-xpu-ops/issues/6088")
         torch.manual_seed(0)
         N = 2**20
         x = (torch.randn(N, dtype=dtype, device=device) * 1e-4).clamp(-57344, 57344)
@@ -2022,9 +2026,11 @@ class TestUnaryUfuncsCUDADevice(TestCase):
         self.assertEqual(y.cpu().view(torch.uint8), ref.view(torch.uint8))
 
 
-instantiate_device_type_tests(TestUnaryUfuncs, globals(), allow_mps=True)
+instantiate_device_type_tests(TestUnaryUfuncs, globals(), allow_mps=True, allow_xpu=True)
 instantiate_device_type_tests(TestUnaryUfuncsCpuOnly , globals(), only_for="cpu")
-instantiate_device_type_tests(TestUnaryUfuncsCUDADevice, globals(), only_for="cuda")
+instantiate_device_type_tests(
+    TestUnaryUfuncsCUDADevice, globals(), only_for=("cuda", "xpu"), allow_xpu=True
+)
 
 if __name__ == "__main__":
     run_tests()
