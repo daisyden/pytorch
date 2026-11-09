@@ -5823,7 +5823,7 @@ class TestTorchDeviceType(TestCase):
             self._test_memory_format_transformations(
                 device, get_generator(mf, shape, torch.float64), get_fn('float'), mf, default_is_preserve=True)
 
-    @onlyCUDA
+    @onlyAccelerator
     def test_memory_format_cpu_and_cuda_ops(self, device):
         def get_generator(memory_format, shape):
             def input_generator_fn(device):
@@ -5833,8 +5833,8 @@ class TestTorchDeviceType(TestCase):
         def transformation_cpu_fn(tensor, **kwargs):
             return tensor.cpu(**kwargs)
 
-        def transformation_cuda_fn(tensor, **kwargs):
-            return tensor.cuda(**kwargs)
+        def transformation_device_fn(tensor, **kwargs):
+            return tensor.to(device, **kwargs)
 
         formats_shapes = (
             (torch.channels_last, (4, 3, 8, 8)),
@@ -5842,9 +5842,9 @@ class TestTorchDeviceType(TestCase):
 
         for mf, shape in formats_shapes:
             self._test_memory_format_transformations(
-                'cuda', get_generator(mf, shape), transformation_cpu_fn, mf, default_is_preserve=True)
+                device, get_generator(mf, shape), transformation_cpu_fn, mf, default_is_preserve=True)
             self._test_memory_format_transformations(
-                'cpu', get_generator(mf, shape), transformation_cuda_fn, mf, default_is_preserve=True)
+                'cpu', get_generator(mf, shape), transformation_device_fn, mf, default_is_preserve=True)
 
     # FIXME: move to test_serialization
     @onlyNativeDeviceTypes
@@ -6085,7 +6085,6 @@ class TestTorchDeviceType(TestCase):
         self.assertEqual(found_inf, 1.0)
 
     @onlyNativeDeviceTypes
-    @skipIfXpu(msg="https://github.com/intel/torch-xpu-ops/issues/5375")
     def test_grad_scaling_state_dict(self, device):
         device = torch.device(device)
         GradScaler = partial(torch.GradScaler, device=device.type)
@@ -6099,10 +6098,8 @@ class TestTorchDeviceType(TestCase):
             if lazy_init_scale:
                 # Dummy scale() call to ensure the scale tensor is lazily initialized.
                 s1.scale(torch.full((1,), 4.0, dtype=torch.float32, device=device))
-                if "cuda" == device.type:
-                    self.assertTrue(isinstance(s1._scale, torch.cuda.FloatTensor))
-                else:
-                    self.assertTrue(isinstance(s1._scale, torch.FloatTensor))
+                self.assertEqual(s1._scale.dtype, torch.float32)
+                self.assertEqual(s1._scale.device.type, device.type)
 
             s1.load_state_dict(s0.state_dict())
 
@@ -7254,6 +7251,34 @@ class TestTorchDeviceType(TestCase):
         if torch.version.cuda is not None:
             self._test_to_with_layout(torch.sparse_csr, device)
 
+    @onlyAccelerator
+    def test_addcmul_cuda_errors_with_cpu_scalars(self, device):
+        # Logic is dtype agnostic, so dtype isn't tested
+        alpha = 0.5
+
+        a = torch.rand((2, 2), device=device)
+        b = torch.rand((2, 2), device=device)
+        c = torch.rand((2, 2), device=device)
+        scalar = torch.rand([], device="cpu")
+
+        with self.assertRaisesRegex(RuntimeError, r'CPU Scalar support for tensor1 argument'):
+            torch.addcmul(a, scalar, c, value=alpha)
+        with self.assertRaisesRegex(RuntimeError, r'CPU Scalar support for self argument'):
+            torch.addcmul(scalar, b, c, value=alpha)
+
+    @unittest.skipIf(not torch.autograd.kineto_available(), "Kineto is required")
+    def test_zero_strided_emits_fill_kernel(self, device):
+        if self.device_type == "cpu":
+            self.skipTest("device-kernel profiling test; accelerator only")
+        base = torch.ones(64, 96, device=device)
+        with torch.profiler.profile() as prof:
+            base[:, ::2].zero_()
+            torch.accelerator.synchronize()
+        names = tuple(event.key for event in prof.key_averages())
+        # Strided zero_ lowers to an elementwise fill kernel on every accelerator;
+        # only the backend's displayed kernel name differs.
+        needle = "elementwise_kernel" if self.device_type == "cuda" else "ElementwiseGlobalRangeKernel"
+        self.assertTrue(any(needle in name for name in names), names)
 
 class TestTorchCUDA(TestCase):
     hw_classification = HardwareClassification.CUDA
@@ -7276,15 +7301,6 @@ class TestTorchCUDA(TestCase):
             torch.cuda.synchronize()
         names = tuple(event.key for event in prof.key_averages())
         self.assertTrue(any("Memset" in name for name in names), names)
-
-    @unittest.skipIf(not torch.autograd.kineto_available(), "Kineto is required")
-    def test_zero_strided_emits_fill_kernel(self, device):
-        base = torch.ones(64, 96, device=device)
-        with torch.profiler.profile() as prof:
-            base[:, ::2].zero_()
-            torch.cuda.synchronize()
-        names = tuple(event.key for event in prof.key_averages())
-        self.assertTrue(any("elementwise_kernel" in name for name in names), names)
 
     @unittest.skipIf(not TEST_CUDA_GRAPH, "CUDA >= 11.0 or ROCm >= 5.3 required for graphs")
     def test_zero_dense_inside_graph_capture(self, device):
@@ -7426,20 +7442,6 @@ class TestTorchCUDA(TestCase):
             _no_sync_helper(f, level)
         for f, level in product(expect_sync, (1, 2)):
             _sync_raises_helper(f, level)
-
-    def test_addcmul_cuda_errors_with_cpu_scalars(self, device):
-        # Logic is dtype agnostic, so dtype isn't tested
-        alpha = 0.5
-
-        a = torch.rand((2, 2), device=device)
-        b = torch.rand((2, 2), device=device)
-        c = torch.rand((2, 2), device=device)
-        scalar = torch.rand([], device="cpu")
-
-        with self.assertRaisesRegex(RuntimeError, r'CPU Scalar support for tensor1 argument'):
-            torch.addcmul(a, scalar, c, value=alpha)
-        with self.assertRaisesRegex(RuntimeError, r'CPU Scalar support for self argument'):
-            torch.addcmul(scalar, b, c, value=alpha)
 
     # FIXME: move to test_serialization
     @deviceCountAtLeast(1)  # Note: Tests works with one but prefers more devices
